@@ -1,0 +1,21 @@
+From: Daniel Leidert <daniel.leidert@wgdd.de>
+Date: Wed, 5 Feb 2020 23:18:37 +0100
+Subject: Disable cli ssl tests
+
+Forwarded: not-needed
+---
+ test/test_cli.rb     | 2 +-
+ test/test_pumactl.rb | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+--- a/test/test_pumactl.rb
++++ b/test/test_pumactl.rb
+@@ -149,7 +149,7 @@
+     assert_kind_of Thread, t.join, "server didn't stop"
+   end
+ 
+-  def test_control_ssl
++  def __test_control_ssl
+     skip_unless :ssl
+ 
+     host = "127.0.0.1"

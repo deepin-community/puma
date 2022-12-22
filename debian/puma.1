@@ -1,0 +1,165 @@
+.TH PUMA "1" "January 2020" "PUMA 3.12" "User Commands"
+
+.SH NAME
+puma \- fast, concurrent web server for ruby and rack
+
+.SH USAGE
+.BI "puma [options...]" " [rackup file]"
+.PP
+.B puma [\-h | \-\-help | \-V | \-\-version]
+
+.SH OPTIONS
+.PP
+The following options are available:
+.TP
+.BI "\-b, \-\-bind " URI
+URI to bind to (tcp://, unix://, ssl://).
+.TP
+.BI "\-C, \-\-config " PATH
+Load given path as a config file.
+.TP
+.BI "\-\-control " URL
+DEPRECATED alias for \fB\-\-control\-url\fR.
+.TP
+.BI "\-\-control\-token " TOKEN
+The \fITOKEN\fR to use as authentication for the control server.
+.TP
+.BI "\-\-control\-url " URL
+The bind \fIURL\fR to use for the control server and app. Use \fIauto\fR to
+use a temp unix server. This requires to use a \fB\-\-control\-token\fR, which
+needs to be given with every request to the control server (\fItoken=foo\fR).
+.TP
+.B \-d, \-\-daemon
+Demonize the server into the background.
+.TP
+.B \-\-debug
+Show low level debugging information.
+.TP
+.BI "\-\-dir " DIR
+Change to given directory before starting.
+.TP
+.BI "\-e, \-\-environment " ENVIRONMENT
+The environment to run the Rack app on. Default \fIdevelopment\fR.
+.TP
+.BI "\-I, \-\-include " PATH
+Specify \fB$LOAD_PATH\fR directories.
+.TP
+.BI "\-p, \-\-port " PORT
+Define the TCP port to bind to. Use \fB\-b\fR for more advanced options.
+.TP
+.BI "\-\-pidfile " PATH
+Use the given path as PID file.
+.TP
+.B \-\-preload
+Preload the application. This loads all the application code prior to forking.
+Preloading reduces total memory usage of an application and is only available
+in cluster mode.
+.TP
+.B \-\-prune\-bundler
+Prune out the bundler env if possible.
+.TP
+.B \-q, \-\-quiet
+Do not log requests internally. Default: \fItrue\fR.
+.TP
+.B \-v, \-\-log-requests
+Log requests as they occur.
+.TP
+.BI "\-R, \-\-restart\-cmd " CMD
+The \fBpuma\fR command to run during a hot restart. Default: \fIinferred\fR.
+.TP
+.BI "\-S, \-\-state " PATH
+Where to store the state details.
+.TP
+.BI "\-t, \-\-threads " INT
+Min:max threads to use. Puma will automatically scale the number of threads,
+from the minimum until it caps out at the maximum, based on how much traffic
+is present. Default: \fI0:16\fR.
+.TP
+.B \-\-tcp\-mode
+Run the app in raw TCP mode instead of HTTP mode.
+.TP
+.B \-\-early-hints
+Enable early hints support.
+.TP
+.BI "\-w, \-\-workers " COUNT
+Activate cluster mode and define number of worker processes to create. In this
+mode workers are forked from a master process. Each child process still has
+its own thread pool and the \fB\-t\fR setting is per worker.
+.TP
+.BI "\-\-tag " NAME
+Additional text to display in process listing.
+.TP
+.BI "\-\-redirect\-stdout " FILE
+Redirect \fBSTDOUT\fR to a specific file.
+.TP
+.BI "\-\-redirect\-stderr " FILE
+Redirect \fBSTDERR\fR to a specific file.
+.TP
+.B \-\-[no\-]redirect\-append
+Append to redirected files.
+.TP
+.B \-h, \-\-help
+Show help.
+.TP    
+.B \-V, \-\-version
+Print the version information.
+
+.SH EXAMPLES
+.PP
+The following examples show how to bind TCP or sockets:
+.PP
+Bind Puma to a socket with the -b (or --bind) flag:
+.RS
+.B puma -b tcp://127.0.0.1:9292
+.RE
+.PP
+To use a UNIX Socket instead of TCP:
+.RS
+.B puma -b unix:///var/run/puma.sock
+.RE
+.PP
+To change the permissions of the UNIX socket, add a umask parameter:
+.RS
+.B puma -b 'unix:///var/run/puma.sock?umask=0111'
+.RE
+.PP
+In need of a bit of security use SSL sockets:
+.RS
+.B puma -b 'ssl://127.0.0.1:9292?key=path_to_key&cert=path_to_cert'
+.RE
+.PP
+The following example show how to Create a control server and use
+.BR pumactl (1)
+to interact with the control server to restart \fBpuma\fR.
+.RS
+.B puma --control-url tcp://127.0.0.1:9293 --control-token foo
+.br
+.B pumactl --control-url 'tcp://127.0.0.1:9293' --control-token foo restart
+.RE
+.PP
+
+.SH "CONFIGURATION FILE"
+.B puma
+will look for a configuration file at \fIconfig/puma.rb\fR. If an environment
+is specified, either via the \fB\-e\fR and \fB\-\-environment\fR flags, or
+through the \fIRACK_ENV\fR or the \fIRAILS_ENV\fR environment variables, it
+looks for configuration at \fIconfig/puma/<environment_name>.rb\fR.
+.PP
+The \fB\-C\fR flag allows one to pass on a custom configuration location. If
+the value specified is a dash (\fI\-\fR) \fBpuma\fR won't look for any
+configuration file:
+.PP
+.RS
+.B puma -C \(dq\-\(dq
+.RE
+
+.SH "SEE ALSO"
+.PP
+There is extensive documentation at <\%https://puma.io/puma/\%> and
+<\%https://github.com/puma/puma\%>.
+
+.SH AUTHOR
+.PP
+This manual page was written by \fBDaniel Leidert\fP
+<\%dleidert@debian\.org\%>, for the Debian GNU/Linux system (but may be used by
+others).

@@ -1,0 +1,39 @@
+From: Daniel Leidert <daniel.leidert@wgdd.de>
+Date: Wed, 5 Feb 2020 22:20:42 +0100
+Subject: Disable unavailable minitest extensions
+
+Forwarded: not-needed
+---
+ test/helper.rb | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+--- a/test/helper.rb
++++ b/test/helper.rb
+@@ -14,7 +14,6 @@
+ require_relative "minitest/verbose"
+ require "minitest/autorun"
+ require "minitest/pride"
+-require "minitest/proveit"
+ require "minitest/stub_const"
+ require "net/http"
+ require_relative "helpers/apps"
+@@ -84,10 +83,6 @@
+ end
+ 
+ Minitest::Test.prepend TimeoutEveryTestCase
+-if ENV['CI']
+-  require 'minitest/retry'
+-  Minitest::Retry.use!
+-end
+ 
+ module TestSkips
+ 
+@@ -157,7 +152,7 @@
+ 
+ class Minitest::Test
+   def self.run(reporter, options = {}) # :nodoc:
+-    prove_it!
++    #prove_it!
+     super
+   end
+ 

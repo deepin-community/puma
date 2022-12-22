@@ -1,0 +1,14 @@
+puma (4.3.1-1)
+
+  Several tests have been disabled by default:
+
+  - test/test_puma_server_ssl.rb has been disabled because all tests fail
+    randomly. However these tests have never been performed in puma 3.x and
+    they also work randomly. So until someone can look into them and fix them,
+    we decided to not run them (see also #921931).
+
+  - test_control_for_ssl (test/test_cli.rb) and
+    test_control_ssl (test/test_pumactl.rb) show similar issues and don't seem
+    to imply that the package fails to work. So they have been disabled too.
+
+ -- Daniel Leidert <dleidert@debian.org>  Wed, 05 Feb 2020 23:51:51 +0100

@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+
+export GEM2DEB_TEST_RUNNER = --check-dependencies
+export DH_RUBY = --gem-install
+export DH_RUBY_GEM_INSTALL_EXCLUDE = benchmarks/* docs/* win_gem_test/* tools/* bin/puma-wild
+export LANG = C.UTF-8
+
+%:
+	dh $@ --buildsystem=ruby --with ruby
+
+override_dh_installchangelogs:
+	dh_installchangelogs History.md

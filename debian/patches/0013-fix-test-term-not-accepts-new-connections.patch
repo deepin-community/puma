@@ -1,0 +1,20 @@
+From: Daniel Leidert <daniel.leidert@wgdd.de>
+Date: Thu, 6 Feb 2020 11:24:24 +0100
+Subject: Fix test to read output locale independent
+
+The test fails if run in a non-English environment.
+---
+ test/test_integration_single.rb | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/test/test_integration_single.rb
++++ b/test/test_integration_single.rb
+@@ -76,7 +76,7 @@
+     true while @server.gets !~ /Gracefully stopping/ # wait for server to begin graceful shutdown
+ 
+     # Invoke a request which must be rejected
+-    _stdin, _stdout, rejected_curl_stderr, rejected_curl_wait_thread = Open3.popen3("curl #{HOST}:#{@tcp_port}")
++    _stdin, _stdout, rejected_curl_stderr, rejected_curl_wait_thread = Open3.popen3({ "LC_ALL" => "C" }, "curl http://#{HOST}:#{@tcp_port}")
+ 
+     assert nil != Process.getpgid(@server.pid) # ensure server is still running
+     assert nil != Process.getpgid(curl_wait_thread[:pid]) # ensure first curl invocation still in progress

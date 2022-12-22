@@ -1,0 +1,21 @@
+From: Antonio Terceiro <terceiro@softwarelivre.org>
+Date: Wed, 5 Feb 2020 21:36:05 +0100
+Subject: Drop git usage from gemspec
+
+Forwarded: not-needed
+---
+ puma.gemspec | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+--- a/puma.gemspec
++++ b/puma.gemspec
+@@ -13,8 +13,7 @@
+   if RbConfig::CONFIG['ruby_version'] >= '2.5'
+     s.metadata["msys2_mingw_dependencies"] = "openssl"
+   end
+-  s.files = `git ls-files -- bin docs ext lib tools`.split("\n") +
+-            %w[History.md LICENSE README.md]
++  s.files = Dir.glob('**/*').reject { |f| f =~ /^debian\//}
+   s.homepage = "https://puma.io"
+ 
+   if s.respond_to?(:metadata=)

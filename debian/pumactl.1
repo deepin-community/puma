@@ -1,0 +1,99 @@
+.TH PUMA "1" "January 2020" "PUMA 3.12" "User Commands"
+
+.SH NAME
+pumactl \- command line client for puma
+
+.SH USAGE
+.B pumactl [options...] [commands]
+.PP
+.B pumactl [\-h | \-\-help | \-V | \-\-version]
+
+.SH COMMANDS
+.TP
+.B halt
+Halt the server.
+.TP
+.B restart
+Restart the server.
+.TP
+.B phased-restart
+Restart server but phase out old workers while starting new workers one at a
+time.
+.TP
+.B start
+Start the server.
+.TP
+.B stats
+Show stats about the server.
+.TP
+.B status
+Show server status.
+.TP
+.B stop
+Stop server.
+.TP
+.B reload-worker-directory
+Reload the worker directory.
+.TP
+.B gc
+Start garbage collector.
+.TP
+.B gc-stats
+Show information about garbage collector.
+
+.SH OPTIONS
+.PP
+The following options are available:
+.TP
+.BI "\-F, \-\-config\-file " PATH
+Load given path as a config file.
+.TP
+.BI "\-T, \-\-control\-token " TOKEN
+The \fITOKEN\fR to use as authentication for the control server.
+.TP
+.BI "\-C, \-\-control\-url " URL
+The bind \fIURL\fR to use for the control server and app. Use \fIauto\fR to
+use a temp unix server. This requires to use a \fB\-\-control\-token\fR, which
+needs to be given with every request to the control server (\fItoken=foo\fR).
+.TP
+.BI "\-p, \-\-pid " PID
+Define the TCP port to bind to. Use \fB\-b\fR for more advanced options.
+.TP
+.BI "\-P, \-\-pidfile " PATH
+Use the given path as PID file.
+.TP
+.B \-Q, \-\-quiet
+Don't display messages.
+.TP
+.BI "\-S, \-\-state " PATH
+Where the state file is.
+.TP
+.B \-H, \-\-help
+Show help.
+.TP    
+.B \-V, \-\-version
+Print the version information.
+
+.SH EXAMPLES
+Create a control server and use
+.BR pumactl (1)
+to interact with the control server to restart \fBpuma\fR.
+.RS
+.B puma --control-url tcp://127.0.0.1:9293 --control-token foo
+.br
+.B pumactl --control-url 'tcp://127.0.0.1:9293' --control-token foo restart
+.RE
+.PP
+
+.SH "SEE ALSO"
+.PP
+.BR puma (1)
+.PP
+There is extensive documentation at <\%https://puma.io/puma/\%> and
+<\%https://github.com/puma/puma\%>.
+
+.SH AUTHOR
+.PP
+This manual page was written by \fBDaniel Leidert\fP
+<\%dleidert@debian\.org\%>, for the Debian GNU/Linux system (but may be used by
+others).

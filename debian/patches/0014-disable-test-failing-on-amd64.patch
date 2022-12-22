@@ -1,0 +1,14 @@
+This test failed on amd64 buildd
+https://buildd.debian.org/status/fetch.php?pkg=puma&arch=amd64&ver=5.2.2-1&stamp=1615133735&raw=0
+
+--- a/test/test_puma_server.rb
++++ b/test/test_puma_server.rb
+@@ -1261,7 +1261,7 @@
+     end
+   end
+ 
+-  def test_command_ignored_before_run
++  def __test_command_ignored_before_run
+     @server.stop # ignored
+     @server.run
+     @server.halt

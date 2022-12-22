@@ -1,0 +1,4 @@
+Test-Command: export AUTOPKGTEST_TEST_PUMA_SERVER_SSL=1 && gem2deb-test-runner --check-dependencies --autopkgtest
+Depends: @, @builddeps@
+Restrictions: allow-stderr
+Features: test-name=ssl

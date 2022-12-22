@@ -1,0 +1,5 @@
+0004-puma.gemspec-drop-git-usage.patch
+0011-disable-minitest-extensions.patch
+0012-disable-cli-ssl-tests.patch
+0013-fix-test-term-not-accepts-new-connections.patch
+0014-disable-test-failing-on-amd64.patch
