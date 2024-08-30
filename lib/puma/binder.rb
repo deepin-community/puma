@@ -3,24 +3,15 @@
 require 'uri'
 require 'socket'
 
-require 'puma/const'
-require 'puma/util'
-require 'puma/configuration'
+require_relative 'const'
+require_relative 'util'
+require_relative 'configuration'
 
 module Puma
 
   if HAS_SSL
-    require 'puma/minissl'
-    require 'puma/minissl/context_builder'
-
-    # Odd bug in 'pure Ruby' nio4r version 2.5.2, which installs with Ruby 2.3.
-    # NIO doesn't create any OpenSSL objects, but it rescues an OpenSSL error.
-    # The bug was that it did not require openssl.
-    # @todo remove when Ruby 2.3 support is dropped
-    #
-    if windows? && RbConfig::CONFIG['ruby_version'] == '2.3.0'
-      require 'openssl'
-    end
+    require_relative 'minissl'
+    require_relative 'minissl/context_builder'
   end
 
   class Binder
@@ -28,8 +19,9 @@ module Puma
 
     RACK_VERSION = [1,6].freeze
 
-    def initialize(events, conf = Configuration.new)
-      @events = events
+    def initialize(log_writer, conf = Configuration.new)
+      @log_writer = log_writer
+      @conf = conf
       @listeners = []
       @inherited_fds = {}
       @activated_sockets = {}
@@ -37,7 +29,7 @@ module Puma
 
       @proto_env = {
         "rack.version".freeze => RACK_VERSION,
-        "rack.errors".freeze => events.stderr,
+        "rack.errors".freeze => log_writer.stderr,
         "rack.multithread".freeze => conf.options[:max_threads] > 1,
         "rack.multiprocess".freeze => conf.options[:workers] >= 1,
         "rack.run_once".freeze => false,
@@ -50,14 +42,12 @@ module Puma
         # infer properly.
 
         "QUERY_STRING".freeze => "",
-        SERVER_PROTOCOL => HTTP_11,
         SERVER_SOFTWARE => PUMA_SERVER_STRING,
         GATEWAY_INTERFACE => CGI_VER
       }
 
       @envs = {}
       @ios = []
-      localhost_authority
     end
 
     attr_reader :ios
@@ -79,7 +69,7 @@ module Puma
     # @!attribute [r] connected_ports
     # @version 5.0.0
     def connected_ports
-      ios.map { |io| io.addr[1] }.uniq
+      t = ios.map { |io| io.addr[1] }; t.uniq!; t
     end
 
     # @version 5.0.0
@@ -97,7 +87,7 @@ module Puma
     # @version 5.0.0
     #
     def create_activated_fds(env_hash)
-      @events.debug "ENV['LISTEN_FDS'] #{ENV['LISTEN_FDS'].inspect}  env_hash['LISTEN_PID'] #{env_hash['LISTEN_PID'].inspect}"
+      @log_writer.debug "ENV['LISTEN_FDS'] #{ENV['LISTEN_FDS'].inspect}  env_hash['LISTEN_PID'] #{env_hash['LISTEN_PID'].inspect}"
       return [] unless env_hash['LISTEN_FDS'] && env_hash['LISTEN_PID'].to_i == $$
       env_hash['LISTEN_FDS'].to_i.times do |index|
         sock = TCPServer.for_fd(socket_activation_fd(index))
@@ -105,11 +95,11 @@ module Puma
           [:unix, Socket.unpack_sockaddr_un(sock.getsockname)]
         rescue ArgumentError # Try to parse as a port/ip
           port, addr = Socket.unpack_sockaddr_in(sock.getsockname)
-          addr = "[#{addr}]" if addr =~ /\:/
+          addr = "[#{addr}]" if addr&.include? ':'
           [:tcp, addr, port]
         end
         @activated_sockets[key] = sock
-        @events.debug "Registered #{key.join ':'} for activation from LISTEN_FDS"
+        @log_writer.debug "Registered #{key.join ':'} for activation from LISTEN_FDS"
       end
       ["LISTEN_FDS", "LISTEN_PID"] # Signal to remove these keys from ENV
     end
@@ -151,29 +141,30 @@ module Puma
       end
     end
 
-    def parse(binds, logger, log_msg = 'Listening')
+    def parse(binds, log_writer = nil, log_msg = 'Listening')
+      log_writer ||= @log_writer
       binds.each do |str|
         uri = URI.parse str
         case uri.scheme
         when "tcp"
           if fd = @inherited_fds.delete(str)
             io = inherit_tcp_listener uri.host, uri.port, fd
-            logger.log "* Inherited #{str}"
+            log_writer.log "* Inherited #{str}"
           elsif sock = @activated_sockets.delete([ :tcp, uri.host, uri.port ])
             io = inherit_tcp_listener uri.host, uri.port, sock
-            logger.log "* Activated #{str}"
+            log_writer.log "* Activated #{str}"
           else
             ios_len = @ios.length
             params = Util.parse_query uri.query
 
-            opt = params.key?('low_latency') && params['low_latency'] != 'false'
-            bak = params.fetch('backlog', 1024).to_i
+            low_latency = params.key?('low_latency') && params['low_latency'] != 'false'
+            backlog = params.fetch('backlog', 1024).to_i
 
-            io = add_tcp_listener uri.host, uri.port, opt, bak
+            io = add_tcp_listener uri.host, uri.port, low_latency, backlog
 
             @ios[ios_len..-1].each do |i|
               addr = loc_addr_str i
-              logger.log "* #{log_msg} on http://#{addr}"
+              log_writer.log "* #{log_msg} on http://#{addr}"
             end
           end
 
@@ -188,14 +179,14 @@ module Puma
           end
 
           if fd = @inherited_fds.delete(str)
-            @unix_paths << path unless abstract
+            @unix_paths << path unless abstract || File.exist?(path)
             io = inherit_unix_listener path, fd
-            logger.log "* Inherited #{str}"
+            log_writer.log "* Inherited #{str}"
           elsif sock = @activated_sockets.delete([ :unix, path ]) ||
               @activated_sockets.delete([ :unix, File.realdirpath(path) ])
             @unix_paths << path unless abstract || File.exist?(path)
             io = inherit_unix_listener path, sock
-            logger.log "* Activated #{str}"
+            log_writer.log "* Activated #{str}"
           else
             umask = nil
             mode = nil
@@ -219,11 +210,12 @@ module Puma
 
             @unix_paths << path unless abstract || File.exist?(path)
             io = add_unix_listener path, umask, mode, backlog
-            logger.log "* #{log_msg} on #{str}"
+            log_writer.log "* #{log_msg} on #{str}"
           end
 
           @listeners << [str, io]
         when "ssl"
+          cert_key = %w[cert key]
 
           raise "Puma compiled without SSL support" unless HAS_SSL
 
@@ -232,36 +224,51 @@ module Puma
           # If key and certs are not defined and localhost gem is required.
           # localhost gem will be used for self signed
           # Load localhost authority if not loaded.
-          ctx = localhost_authority && localhost_authority_context if params.empty?
+          # Ruby 3 `values_at` accepts an array, earlier do not
+          if params.values_at(*cert_key).all? { |v| v.to_s.empty? }
+            ctx = localhost_authority && localhost_authority_context
+          end
 
-          ctx ||= MiniSSL::ContextBuilder.new(params, @events).context
+          ctx ||=
+            begin
+              # Extract cert_pem and key_pem from options[:store] if present
+              cert_key.each do |v|
+                if params[v]&.start_with?('store:')
+                  index = Integer(params.delete(v).split('store:').last)
+                  params["#{v}_pem"] = @conf.options[:store][index]
+                end
+              end
+              MiniSSL::ContextBuilder.new(params, @log_writer).context
+            end
 
           if fd = @inherited_fds.delete(str)
-            logger.log "* Inherited #{str}"
+            log_writer.log "* Inherited #{str}"
             io = inherit_ssl_listener fd, ctx
           elsif sock = @activated_sockets.delete([ :tcp, uri.host, uri.port ])
             io = inherit_ssl_listener sock, ctx
-            logger.log "* Activated #{str}"
+            log_writer.log "* Activated #{str}"
           else
             ios_len = @ios.length
-            io = add_ssl_listener uri.host, uri.port, ctx
+            backlog = params.fetch('backlog', 1024).to_i
+            low_latency = params['low_latency'] != 'false'
+            io = add_ssl_listener uri.host, uri.port, ctx, low_latency, backlog
 
             @ios[ios_len..-1].each do |i|
               addr = loc_addr_str i
-              logger.log "* #{log_msg} on ssl://#{addr}?#{uri.query}"
+              log_writer.log "* #{log_msg} on ssl://#{addr}?#{uri.query}"
             end
           end
 
           @listeners << [str, io] if io
         else
-          logger.error "Invalid URI: #{str}"
+          log_writer.error "Invalid URI: #{str}"
         end
       end
 
       # If we inherited fds but didn't use them (because of a
       # configuration change), then be sure to close them.
       @inherited_fds.each do |str, fd|
-        logger.log "* Closing unused inherited connection: #{str}"
+        log_writer.log "* Closing unused inherited connection: #{str}"
 
         begin
           IO.for_fd(fd).close
@@ -281,7 +288,7 @@ module Puma
         fds = @ios.map(&:to_i)
         @activated_sockets.each do |key, sock|
           next if fds.include? sock.to_i
-          logger.log "* Closing unused activated socket: #{key.first}://#{key[1..-1].join ':'}"
+          log_writer.log "* Closing unused activated socket: #{key.first}://#{key[1..-1].join ':'}"
           begin
             sock.close
           rescue SystemCallError
@@ -305,7 +312,7 @@ module Puma
         local_certificates_path = File.expand_path("~/.localhost")
         [File.join(local_certificates_path, "localhost.key"), File.join(local_certificates_path, "localhost.crt")]
       end
-      MiniSSL::ContextBuilder.new({ "key" => key_path, "cert" => crt_path }, @events).context
+      MiniSSL::ContextBuilder.new({ "key" => key_path, "cert" => crt_path }, @log_writer).context
     end
 
     # Tell the server to listen on host +host+, port +port+.
@@ -323,7 +330,7 @@ module Puma
         return
       end
 
-      host = host[1..-2] if host and host[0..0] == '['
+      host = host[1..-2] if host&.start_with? '['
       tcp_server = TCPServer.new(host, port)
 
       if optimize_for_latency
@@ -357,7 +364,7 @@ module Puma
         return
       end
 
-      host = host[1..-2] if host[0..0] == '['
+      host = host[1..-2] if host&.start_with? '['
       s = TCPServer.new(host, port)
       if optimize_for_latency
         s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
@@ -443,11 +450,14 @@ module Puma
 
     def close_listeners
       @listeners.each do |l, io|
-        io.close unless io.closed?
-        uri = URI.parse l
-        next unless uri.scheme == 'unix'
-        unix_path = "#{uri.host}#{uri.path}"
-        File.unlink unix_path if @unix_paths.include?(unix_path) && File.exist?(unix_path)
+        begin
+          io.close unless io.closed?
+          uri = URI.parse l
+          next unless uri.scheme == 'unix'
+          unix_path = "#{uri.host}#{uri.path}"
+          File.unlink unix_path if @unix_paths.include?(unix_path) && File.exist?(unix_path)
+        rescue Errno::EBADF
+        end
       end
     end
 
@@ -468,9 +478,10 @@ module Puma
 
     # @!attribute [r] loopback_addresses
     def loopback_addresses
-      Socket.ip_address_list.select do |addrinfo|
+      t = Socket.ip_address_list.select do |addrinfo|
         addrinfo.ipv6_loopback? || addrinfo.ipv4_loopback?
-      end.map { |addrinfo| addrinfo.ip_address }.uniq
+      end
+      t.map! { |addrinfo| addrinfo.ip_address }; t.uniq!; t
     end
 
     def loc_addr_str(io)

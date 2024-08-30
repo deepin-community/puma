@@ -10,7 +10,8 @@ License: BSD-3-clause
 
 Files: debian/*
 Copyright: 2016 Antonio Terceiro <terceiro@debian.org>
-           2020 Daniel Leidert <dleidert@debian.org>
+           2020,2023 Daniel Leidert <dleidert@debian.org>
+           2023 Debian Ruby Extras Maintainers <pkg-ruby-extras-maintainers@lists.alioth.debian.org>
 License: BSD-3-clause
 Comment: The Debian packaging is licensed under the same terms as the source.
 

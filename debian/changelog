@@ -1,3 +1,100 @@
+puma (6.4.2-5) unstable; urgency=medium
+
+  * Backport upstream patch to update certificates in examples.
+    This fixes a test failure.
+
+ -- Lucas Kanashiro <kanashiro@debian.org>  Sat, 20 Jul 2024 12:24:05 -0300
+
+puma (6.4.2-4) unstable; urgency=medium
+
+  * Disable test failing on armhf
+
+ -- Pirate Praveen <praveen@debian.org>  Tue, 06 Feb 2024 18:13:41 +0530
+
+puma (6.4.2-3) unstable; urgency=medium
+
+  * Add Breaks: rails (<< 2:6.1.7.3+dfsg-3~)
+
+ -- Pirate Praveen <praveen@debian.org>  Mon, 05 Feb 2024 15:12:00 +0530
+
+puma (6.4.2-2) unstable; urgency=medium
+
+  * Disable test failing on arm64 buildd
+
+ -- Pirate Praveen <praveen@debian.org>  Mon, 05 Feb 2024 14:11:14 +0530
+
+puma (6.4.2-1) unstable; urgency=medium
+
+  * Switch to github tags from releases (6.4.2 is only available from tags)
+  * New upstream version 6.4.2 (Fixes: CVE-2024-21647)
+
+ -- Pirate Praveen <praveen@debian.org>  Mon, 05 Feb 2024 01:08:22 +0530
+
+puma (6.4.0-4) unstable; urgency=medium
+
+  * Remove minitest/retry as well (copy from 5.x branch and fixes salsa ci)
+  * Export LC_ALL also to C.UTF-8 (hoping this would fix some test failures)
+
+ -- Pirate Praveen <praveen@debian.org>  Mon, 05 Feb 2024 00:52:13 +0530
+
+puma (6.4.0-3) unstable; urgency=medium
+
+  * Reupload to unstable
+
+ -- Pirate Praveen <praveen@debian.org>  Sun, 04 Feb 2024 01:16:15 +0530
+
+puma (6.4.0-2) experimental; urgency=medium
+
+  * Set TEST_CASE_TIMEOUT = 300 (one test is timing out on amd64 buildd)
+
+ -- Pirate Praveen <praveen@debian.org>  Mon, 04 Dec 2023 23:59:02 +0530
+
+puma (6.4.0-1) experimental; urgency=medium
+
+  * New upstream version 6.4.0
+  * Disable more tests and refresh patches
+  * Add procps to build depends for kill command (used in tests)
+
+ -- Pirate Praveen <praveen@debian.org>  Sun, 03 Dec 2023 13:58:23 +0530
+
+puma (6.0.2-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+  * d/control (Standards-Version): Bump to 4.6.2.
+    (Build-Depends): Add ruby-sd-notify.
+  * d/copyright (Copyright): Update years.
+  * d/ruby-tests.rake: Re-enable multiple tests (closes: #984713).
+  * d/upstream/metadata: Adjust a few URLs.
+
+ -- Daniel Leidert <dleidert@debian.org>  Thu, 09 Feb 2023 16:12:20 +0100
+
+puma (5.6.5-2) unstable; urgency=medium
+
+  * debian/ruby-tests.rake: skip test that fails often (Closes: #1006022)
+  * debian/ruby-tests.rake: exclude tests that fail often but not always
+
+ -- Antonio Terceiro <terceiro@debian.org>  Wed, 02 Nov 2022 09:26:37 -0300
+
+puma (5.6.5-1) unstable; urgency=medium
+
+  * Update watch file for github.com pattern change
+  * New upstream version 5.6.5
+  * Refresh patches
+  * Bump Standards-Version to 4.6.1 (no changes needed)
+
+ -- Pirate Praveen <praveen@debian.org>  Sun, 16 Oct 2022 22:44:46 +0530
+
+puma (5.6.4-1) unstable; urgency=medium
+
+  * New upstream version 5.6.4
+  * Refresh patches
+  * Disable some tests that fail with
+     NameError: uninitialized constant Puma::LogWriter
+  * Remove tmp/restart.txt in clean
+
+ -- Pirate Praveen <praveen@debian.org>  Mon, 04 Apr 2022 13:24:10 +0530
+
 puma (5.5.2-2) unstable; urgency=medium
 
   * Team upload

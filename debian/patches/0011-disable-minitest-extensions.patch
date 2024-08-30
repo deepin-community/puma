@@ -4,12 +4,12 @@ Subject: Disable unavailable minitest extensions
 
 Forwarded: not-needed
 ---
- test/helper.rb | 8 ++++----
- 1 file changed, 4 insertions(+), 4 deletions(-)
+ test/helper.rb | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
 
 --- a/test/helper.rb
 +++ b/test/helper.rb
-@@ -14,7 +14,6 @@
+@@ -16,7 +16,6 @@
  require_relative "minitest/verbose"
  require "minitest/autorun"
  require "minitest/pride"
@@ -17,20 +17,22 @@ Forwarded: not-needed
  require "minitest/stub_const"
  require "net/http"
  require_relative "helpers/apps"
-@@ -84,10 +83,6 @@
- end
- 
+@@ -110,12 +109,9 @@
  Minitest::Test.prepend TimeoutEveryTestCase
--if ENV['CI']
+ 
+ if ENV['CI']
 -  require 'minitest/retry'
+ 
+   SUMMARY_FILE = ENV['GITHUB_STEP_SUMMARY']
+ 
 -  Minitest::Retry.use!
--end
+-
+   if SUMMARY_FILE && ENV['GITHUB_ACTIONS'] == 'true'
  
- module TestSkips
+     GITHUB_STEP_SUMMARY_MUTEX = Mutex.new
+@@ -215,7 +211,7 @@
+   PROJECT_ROOT = File.dirname(__dir__)
  
-@@ -157,7 +152,7 @@
- 
- class Minitest::Test
    def self.run(reporter, options = {}) # :nodoc:
 -    prove_it!
 +    #prove_it!

@@ -3,36 +3,31 @@
 require 'optparse'
 require 'uri'
 
-require 'puma'
-require 'puma/configuration'
-require 'puma/launcher'
-require 'puma/const'
-require 'puma/events'
+require_relative '../puma'
+require_relative 'configuration'
+require_relative 'launcher'
+require_relative 'const'
+require_relative 'log_writer'
 
 module Puma
   class << self
-    # The CLI exports its Puma::Configuration object here to allow
-    # apps to pick it up. An app needs to use it conditionally though
-    # since it is not set if the app is launched via another
-    # mechanism than the CLI class.
+    # The CLI exports a Puma::Configuration instance here to allow
+    # apps to pick it up. An app must load this object conditionally
+    # because it is not set if the app is launched via any mechanism
+    # other than the CLI class.
     attr_accessor :cli_config
   end
 
   # Handles invoke a Puma::Server in a command line style.
   #
   class CLI
-    KEYS_NOT_TO_PERSIST_IN_STATE = Launcher::KEYS_NOT_TO_PERSIST_IN_STATE
-
     # Create a new CLI object using +argv+ as the command line
     # arguments.
     #
-    # +stdout+ and +stderr+ can be set to IO-like objects which
-    # this object will report status on.
-    #
-    def initialize(argv, events=Events.stdio)
+    def initialize(argv, log_writer = LogWriter.stdio, events = Events.new)
       @debug = false
       @argv = argv.dup
-
+      @log_writer = log_writer
       @events = events
 
       @conf = nil
@@ -68,7 +63,7 @@ module Puma
         end
       end
 
-      @launcher = Puma::Launcher.new(@conf, :events => @events, :argv => argv)
+      @launcher = Puma::Launcher.new(@conf, :log_writer => @log_writer, :events => @events, :argv => argv)
     end
 
     attr_reader :launcher
@@ -82,7 +77,7 @@ module Puma
 
     private
     def unsupported(str)
-      @events.error(str)
+      @log_writer.error(str)
       raise UnsupportedOption
     end
 
@@ -98,7 +93,7 @@ module Puma
     #
 
     def setup_options
-      @conf = Configuration.new do |user_config, file_config|
+      @conf = Configuration.new({}, {events: @events}) do |user_config, file_config|
         @parser = OptionParser.new do |o|
           o.on "-b", "--bind URI", "URI to bind to (tcp://, unix://, ssl://)" do |arg|
             user_config.bind arg
@@ -149,9 +144,13 @@ module Puma
             $LOAD_PATH.unshift(*arg.split(':'))
           end
 
+          o.on "--idle-timeout SECONDS", "Number of seconds until the next request before automatic shutdown" do |arg|
+            user_config.idle_timeout arg
+          end
+
           o.on "-p", "--port PORT", "Define the TCP port to bind to",
             "Use -b for more advanced options" do |arg|
-            user_config.bind "tcp://#{Configuration::DefaultTCPHost}:#{arg}"
+            user_config.bind "tcp://#{Configuration::DEFAULTS[:tcp_host]}:#{arg}"
           end
 
           o.on "--pidfile PATH", "Use PATH as a pidfile" do |arg|
@@ -182,6 +181,10 @@ module Puma
             "The puma command to run during a hot restart",
             "Default: inferred" do |cmd|
             user_config.restart_command cmd
+          end
+
+          o.on "-s", "--silent", "Do not log prompt messages other than errors" do
+            @log_writer = LogWriter.new(NullIO.new, $stderr)
           end
 
           o.on "-S", "--state PATH", "Where to store the state details" do |arg|

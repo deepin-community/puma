@@ -36,13 +36,13 @@ static VALUE global_request_method;
 static VALUE global_request_uri;
 static VALUE global_fragment;
 static VALUE global_query_string;
-static VALUE global_http_version;
+static VALUE global_server_protocol;
 static VALUE global_request_path;
 
 /** Defines common length and error messages for input length validation. */
 #define QUOTE(s) #s
-#define EXPLAIN_MAX_LENGTH_VALUE(s) QUOTE(s)
-#define DEF_MAX_LENGTH(N,length) const size_t MAX_##N##_LENGTH = length; const char *MAX_##N##_LENGTH_ERR = "HTTP element " # N  " is longer than the " EXPLAIN_MAX_LENGTH_VALUE(length) " allowed length (was %d)"
+#define EXPAND_MAX_LENGTH_VALUE(s) QUOTE(s)
+#define DEF_MAX_LENGTH(N,length) const size_t MAX_##N##_LENGTH = length; const char *MAX_##N##_LENGTH_ERR = "HTTP element " # N  " is longer than the " EXPAND_MAX_LENGTH_VALUE(length) " allowed length (was %d)"
 
 /** Validates the max length of given input and throws an HttpParserError exception if over. */
 #define VALIDATE_MAX_LENGTH(len, N) if(len > MAX_##N##_LENGTH) { rb_raise(eHttpParserError, MAX_##N##_LENGTH_ERR, len); }
@@ -52,15 +52,23 @@ static VALUE global_request_path;
 
 
 /* Defines the maximum allowed lengths for various input elements.*/
+#ifndef PUMA_REQUEST_URI_MAX_LENGTH
+#define PUMA_REQUEST_URI_MAX_LENGTH (1024 * 12)
+#endif
+
+#ifndef PUMA_REQUEST_PATH_MAX_LENGTH
+#define PUMA_REQUEST_PATH_MAX_LENGTH (8192)
+#endif
+
 #ifndef PUMA_QUERY_STRING_MAX_LENGTH
 #define PUMA_QUERY_STRING_MAX_LENGTH (1024 * 10)
 #endif
 
 DEF_MAX_LENGTH(FIELD_NAME, 256);
 DEF_MAX_LENGTH(FIELD_VALUE, 80 * 1024);
-DEF_MAX_LENGTH(REQUEST_URI, 1024 * 12);
+DEF_MAX_LENGTH(REQUEST_URI, PUMA_REQUEST_URI_MAX_LENGTH);
 DEF_MAX_LENGTH(FRAGMENT, 1024); /* Don't know if this length is specified somewhere or not */
-DEF_MAX_LENGTH(REQUEST_PATH, 8192);
+DEF_MAX_LENGTH(REQUEST_PATH, PUMA_REQUEST_PATH_MAX_LENGTH);
 DEF_MAX_LENGTH(QUERY_STRING, PUMA_QUERY_STRING_MAX_LENGTH);
 DEF_MAX_LENGTH(HEADER, (1024 * (80 + 32)));
 
@@ -236,10 +244,10 @@ void query_string(puma_parser* hp, const char *at, size_t length)
   rb_hash_aset(hp->request, global_query_string, val);
 }
 
-void http_version(puma_parser* hp, const char *at, size_t length)
+void server_protocol(puma_parser* hp, const char *at, size_t length)
 {
   VALUE val = rb_str_new(at, length);
-  rb_hash_aset(hp->request, global_http_version, val);
+  rb_hash_aset(hp->request, global_server_protocol, val);
 }
 
 /** Finalizes the request header to have a bunch of stuff that's
@@ -281,7 +289,7 @@ VALUE HttpParser_alloc(VALUE klass)
   hp->fragment = fragment;
   hp->request_path = request_path;
   hp->query_string = query_string;
-  hp->http_version = http_version;
+  hp->server_protocol = server_protocol;
   hp->header_done = header_done;
   hp->request = Qnil;
 
@@ -451,7 +459,7 @@ VALUE HttpParser_body(VALUE self) {
 void Init_mini_ssl(VALUE mod);
 #endif
 
-void Init_puma_http11()
+void Init_puma_http11(void)
 {
 
   VALUE mPuma = rb_define_module("Puma");
@@ -461,7 +469,7 @@ void Init_puma_http11()
   DEF_GLOBAL(request_uri, "REQUEST_URI");
   DEF_GLOBAL(fragment, "FRAGMENT");
   DEF_GLOBAL(query_string, "QUERY_STRING");
-  DEF_GLOBAL(http_version, "HTTP_VERSION");
+  DEF_GLOBAL(server_protocol, "SERVER_PROTOCOL");
   DEF_GLOBAL(request_path, "REQUEST_PATH");
 
   eHttpParserError = rb_define_class_under(mPuma, "HttpParserError", rb_eIOError);

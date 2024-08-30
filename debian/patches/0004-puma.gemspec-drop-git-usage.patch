@@ -7,9 +7,11 @@ Forwarded: not-needed
  puma.gemspec | 3 +--
  1 file changed, 1 insertion(+), 2 deletions(-)
 
+diff --git a/puma.gemspec b/puma.gemspec
+index f5e01c2..9ff86a3 100644
 --- a/puma.gemspec
 +++ b/puma.gemspec
-@@ -13,8 +13,7 @@
+@@ -13,8 +13,7 @@ Gem::Specification.new do |s|
    if RbConfig::CONFIG['ruby_version'] >= '2.5'
      s.metadata["msys2_mingw_dependencies"] = "openssl"
    end

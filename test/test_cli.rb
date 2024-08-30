@@ -1,13 +1,16 @@
 require_relative "helper"
 require_relative "helpers/ssl" if ::Puma::HAS_SSL
 require_relative "helpers/tmp_path"
+require_relative "helpers/test_puma/puma_socket"
 
 require "puma/cli"
 require "json"
+require "psych"
 
 class TestCLI < Minitest::Test
   include SSLHelper if ::Puma::HAS_SSL
   include TmpPath
+  include TestPuma::PumaSocket
 
   def setup
     @environment = 'production'
@@ -20,12 +23,19 @@ class TestCLI < Minitest::Test
 
     @wait, @ready = IO.pipe
 
-    @events = Puma::Events.strings
+    @log_writer = Puma::LogWriter.strings
+
+    @events = Puma::Events.new
     @events.on_booted { @ready << "!" }
+
+    @puma_version_pattern = "\\d+.\\d+.\\d+(\\.[a-z\\d]+)?"
   end
 
   def wait_booted
     @wait.sysread 1
+  rescue Errno::EAGAIN
+    sleep 0.001
+    retry
   end
 
   def teardown
@@ -37,30 +47,25 @@ class TestCLI < Minitest::Test
   end
 
   def test_control_for_tcp
-    cntl = UniquePort.call
-    url = "tcp://127.0.0.1:#{cntl}/"
+    control_port = UniquePort.call
+    url = "tcp://127.0.0.1:#{control_port}/"
 
     cli = Puma::CLI.new ["-b", "tcp://127.0.0.1:0",
                          "--control-url", url,
                          "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
-    t = Thread.new do
-      cli.run
-    end
+    t = Thread.new { cli.run }
 
     wait_booted
 
-    s = TCPSocket.new "127.0.0.1", cntl
-    s << "GET /stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stats HTTP/1.0\r\n\r\n", port: control_port
 
     assert_equal Puma.stats_hash, JSON.parse(Puma.stats, symbolize_names: true)
 
-    dmt = Puma::Configuration.new.default_max_threads
-    assert_match(/{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","backlog":0,"running":0,"pool_capacity":#{dmt},"max_threads":#{dmt},"requests_count":0}/, body.split(/\r?\n/).last)
-
+    dmt = Puma::Configuration::DEFAULTS[:max_threads]
+    expected_stats = /\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","backlog":0,"running":0,"pool_capacity":#{dmt},"max_threads":#{dmt},"requests_count":0,"versions":\{"puma":"#{@puma_version_pattern}","ruby":\{"engine":"\w+","version":"\d+.\d+.\d+","patchlevel":-?\d+\}\}\}/
+    assert_match(expected_stats, body)
   ensure
     cli.launcher.stop
     t.join
@@ -78,30 +83,22 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new ["-b", "tcp://127.0.0.1:0",
                          "--control-url", control_url,
                          "--control-token", token,
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
-    t = Thread.new do
-      cli.run
-    end
+    t = Thread.new { cli.run }
 
     wait_booted
 
-    body = ""
-    http = Net::HTTP.new control_host, control_port
-    http.use_ssl = true
-    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-    http.start do
-      req = Net::HTTP::Get.new "/stats?token=#{token}", {}
-      body = http.request(req).body
-    end
+    body = send_http_read_resp_body "GET /stats?token=#{token} HTTP/1.0\r\n\r\n",
+      port: control_port, ctx: new_ctx
 
-    dmt = Puma::Configuration.new.default_max_threads
+    dmt = Puma::Configuration::DEFAULTS[:max_threads]
     expected_stats = /{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","backlog":0,"running":0,"pool_capacity":#{dmt},"max_threads":#{dmt}/
-    assert_match(expected_stats, body.split(/\r?\n/).last)
-
+    assert_match(expected_stats, body)
   ensure
-    cli.launcher.stop if cli
-    t.join if t
+    # always called, even if skipped
+    cli&.launcher&.stop
+    t&.join
   end
 
   def test_control_clustered
@@ -114,7 +111,7 @@ class TestCLI < Minitest::Test
                          "-w", "2",
                          "--control-url", url,
                          "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
     # without this, Minitest.after_run will trigger on this test ?
     $debugging_hold = true
@@ -123,22 +120,16 @@ class TestCLI < Minitest::Test
 
     wait_booted
 
-    s = UNIXSocket.new @tmp_path
-    s << "GET /stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stats HTTP/1.0\r\n\r\n", path: @tmp_path
 
-    require 'json'
-    status = JSON.parse(body.split("\n").last)
+    status = JSON.parse(body)
 
     assert_equal 2, status["workers"]
 
-    s = UNIXSocket.new @tmp_path
-    s << "GET /stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stats HTTP/1.0\r\n\r\n", path: @tmp_path
 
-    assert_match(/\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","workers":2,"phase":0,"booted_workers":2,"old_workers":0,"worker_status":\[\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","pid":\d+,"index":0,"phase":0,"booted":true,"last_checkin":"[^"]+","last_status":\{"backlog":0,"running":2,"pool_capacity":2,"max_threads":2,"requests_count":0\}\},\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","pid":\d+,"index":1,"phase":0,"booted":true,"last_checkin":"[^"]+","last_status":\{"backlog":0,"running":2,"pool_capacity":2,"max_threads":2,"requests_count":0\}\}\]\}/, body.split("\r\n").last)
+    expected_stats = /\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","workers":2,"phase":0,"booted_workers":2,"old_workers":0,"worker_status":\[\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","pid":\d+,"index":0,"phase":0,"booted":true,"last_checkin":"[^"]+","last_status":\{"backlog":0,"running":2,"pool_capacity":2,"max_threads":2,"requests_count":0\}\},\{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","pid":\d+,"index":1,"phase":0,"booted":true,"last_checkin":"[^"]+","last_status":\{"backlog":0,"running":2,"pool_capacity":2,"max_threads":2,"requests_count":0\}\}\],"versions":\{"puma":"#{@puma_version_pattern}","ruby":\{"engine":"\w+","version":"\d+.\d+.\d+","patchlevel":-?\d+\}\}\}/
+    assert_match(expected_stats, body)
   ensure
     if UNIX_SKT_EXIST && HAS_FORK
       cli.launcher.stop
@@ -146,8 +137,8 @@ class TestCLI < Minitest::Test
 
       done = nil
       until done
-        @events.stdout.rewind
-        log = @events.stdout.readlines.join ''
+        @log_writer.stdout.rewind
+        log = @log_writer.stdout.readlines.join ''
         done = log[/ - Goodbye!/]
       end
 
@@ -162,19 +153,17 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new ["-b", "unix://#{@tmp_path2}",
                          "--control-url", url,
                          "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
     t = Thread.new { cli.run }
 
     wait_booted
 
-    s = UNIXSocket.new @tmp_path
-    s << "GET /stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stats HTTP/1.0\r\n\r\n", path: @tmp_path
 
-    dmt = Puma::Configuration.new.default_max_threads
-    assert_match(/{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","backlog":0,"running":0,"pool_capacity":#{dmt},"max_threads":#{dmt},"requests_count":0}/, body.split("\r\n").last)
+    dmt = Puma::Configuration::DEFAULTS[:max_threads]
+    expected_stats = /{"started_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z","backlog":0,"running":0,"pool_capacity":#{dmt},"max_threads":#{dmt},"requests_count":0,"versions":\{"puma":"#{@puma_version_pattern}","ruby":\{"engine":"\w+","version":"\d+.\d+.\d+","patchlevel":-?\d+\}\}\}/
+    assert_match(expected_stats, body)
   ensure
     if UNIX_SKT_EXIST
       cli.launcher.stop
@@ -189,59 +178,43 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new ["-b", "unix://#{@tmp_path2}",
                          "--control-url", url,
                          "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
     t = Thread.new { cli.run }
 
     wait_booted
 
-    s = UNIXSocket.new @tmp_path
-    s << "GET /stop HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stop HTTP/1.0\r\n\r\n", path: @tmp_path
 
-    assert_equal '{ "status": "ok" }', body.split("\r\n").last
+    assert_equal '{ "status": "ok" }', body
   ensure
     t.join if UNIX_SKT_EXIST
   end
 
   def test_control_requests_count
-    tcp  = UniquePort.call
-    cntl = UniquePort.call
-    url = "tcp://127.0.0.1:#{cntl}/"
+    @bind_port = UniquePort.call
+    control_port = UniquePort.call
+    url = "tcp://127.0.0.1:#{control_port}/"
 
-    cli = Puma::CLI.new ["-b", "tcp://127.0.0.1:#{tcp}",
+    cli = Puma::CLI.new ["-b", "tcp://127.0.0.1:#{@bind_port}",
                          "--control-url", url,
                          "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
-    t = Thread.new do
-      cli.run
-    end
+    t = Thread.new { cli.run }
 
     wait_booted
 
-    s = TCPSocket.new "127.0.0.1", cntl
-    s << "GET /stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stats HTTP/1.0\r\n\r\n", port: control_port
 
-    assert_equal 0, JSON.parse(body.split(/\r?\n/).last)['requests_count']
+    assert_equal 0, JSON.parse(body)['requests_count']
 
     # send real requests to server
-    3.times do
-      s = TCPSocket.new "127.0.0.1", tcp
-      s << "GET / HTTP/1.0\r\n\r\n"
-      body = s.read
-      s.close
-    end
+    3.times { send_http_read_resp_body GET_10 }
 
-    s = TCPSocket.new "127.0.0.1", cntl
-    s << "GET /stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    body = send_http_read_resp_body "GET /stats HTTP/1.0\r\n\r\n", port: control_port
 
-    assert_equal 3, JSON.parse(body.split(/\r?\n/).last)['requests_count']
+    assert_equal 3, JSON.parse(body)['requests_count']
   ensure
     cli.launcher.stop
     t.join
@@ -254,89 +227,27 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new ["-b", "unix://#{@tmp_path2}",
                          "--control-url", url,
                          "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
+                         "test/rackup/hello.ru"], @log_writer, @events
 
     t = Thread.new { cli.run }
 
     wait_booted
 
-    s = UNIXSocket.new @tmp_path
-    s << "GET /thread-backtraces HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
+    if TRUFFLE
+      Thread.pass
+      sleep 0.2
+    end
 
-    assert_match %r{Thread: TID-}, body.split("\r\n").last
+    # All thread backtraces may be very large, just get a chunk
+    socket = send_http "GET /thread-backtraces HTTP/1.0\r\n\r\n", path: @tmp_path
+    socket.wait_readable 3
+    body = socket.sysread 32_768
+    assert_match %r{Thread: TID-}, body
   ensure
     cli.launcher.stop if cli
     t.join if UNIX_SKT_EXIST
   end
 
-  def control_gc_stats(uri, cntl)
-    cli = Puma::CLI.new ["-b", uri,
-                         "--control-url", cntl,
-                         "--control-token", "",
-                         "test/rackup/lobster.ru"], @events
-
-    t = Thread.new do
-      cli.run
-    end
-
-    wait_booted
-
-    s = yield
-    s << "GET /gc-stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
-
-    lines = body.split("\r\n")
-    json_line = lines.detect { |l| l[0] == "{" }
-    pairs = json_line.scan(/\"[^\"]+\": [^,]+/)
-    gc_stats = {}
-    pairs.each do |p|
-      p =~ /\"([^\"]+)\": ([^,]+)/ || raise("Can't parse #{p.inspect}!")
-      gc_stats[$1] = $2
-    end
-    gc_count_before = gc_stats["count"].to_i
-
-    s = yield
-    s << "GET /gc HTTP/1.0\r\n\r\n"
-    body = s.read # Ignored
-    s.close
-
-    s = yield
-    s << "GET /gc-stats HTTP/1.0\r\n\r\n"
-    body = s.read
-    s.close
-
-    lines = body.split("\r\n")
-    json_line = lines.detect { |l| l[0] == "{" }
-    gc_stats = JSON.parse(json_line)
-    gc_count_after = gc_stats["count"].to_i
-
-    # Hitting the /gc route should increment the count by 1
-    assert(gc_count_before < gc_count_after, "make sure a gc has happened")
-
-  ensure
-    cli.launcher.stop if cli
-    t.join
-  end
-
-  def test_control_gc_stats_tcp
-    uri  = "tcp://127.0.0.1:#{UniquePort.call}/"
-    cntl_port = UniquePort.call
-    cntl = "tcp://127.0.0.1:#{cntl_port}/"
-
-    control_gc_stats(uri, cntl) { TCPSocket.new "127.0.0.1", cntl_port }
-  end
-
-  def test_control_gc_stats_unix
-    skip_unless :unix
-
-    uri  = "unix://#{@tmp_path2}"
-    cntl = "unix://#{@tmp_path}"
-
-    control_gc_stats(uri, cntl) { UNIXSocket.new @tmp_path }
-  end
 
   def test_tmp_control
     skip_if :jruby, suffix: " - Unknown issue"
@@ -344,15 +255,25 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new ["--state", @tmp_path, "--control-url", "auto"]
     cli.launcher.write_state
 
-    data = YAML.load File.read(@tmp_path)
+    opts = cli.launcher.instance_variable_get(:@options)
 
-    assert_equal Process.pid, data["pid"]
+    data = Psych.load_file @tmp_path
+
+    Puma::StateFile::ALLOWED_FIELDS.each do |key|
+      val =
+        case key
+        when 'pid'          then Process.pid
+        when 'running_from' then File.expand_path('.') # same as Launcher
+        else                     opts[key.to_sym]
+        end
+      assert_equal val, data[key]
+    end
+
+    assert_equal (Puma::StateFile::ALLOWED_FIELDS & data.keys).sort, data.keys.sort
 
     url = data["control_url"]
 
-    m = %r!unix://(.*)!.match(url)
-
-    assert m, "'#{url}' is not a URL"
+    assert_operator url, :start_with?, "unix://", "'#{url}' is not a URL"
   end
 
   def test_state_file_callback_filtering
@@ -361,36 +282,35 @@ class TestCLI < Minitest::Test
                           "--state", @tmp_path ]
     cli.launcher.write_state
 
-    data = YAML.load_file(@tmp_path)
+    data = Psych.load_file @tmp_path
 
-    keys_not_stripped = data.keys & Puma::CLI::KEYS_NOT_TO_PERSIST_IN_STATE
-    assert_empty keys_not_stripped
+    assert_equal (Puma::StateFile::ALLOWED_FIELDS & data.keys).sort, data.keys.sort
   end
 
   def test_log_formatter_default_single
     cli = Puma::CLI.new [ ]
-    assert_instance_of Puma::Events::DefaultFormatter, cli.launcher.events.formatter
+    assert_instance_of Puma::LogWriter::DefaultFormatter, cli.launcher.log_writer.formatter
   end
 
   def test_log_formatter_default_clustered
     skip_unless :fork
 
     cli = Puma::CLI.new [ "-w 2" ]
-    assert_instance_of Puma::Events::PidFormatter, cli.launcher.events.formatter
+    assert_instance_of Puma::LogWriter::PidFormatter, cli.launcher.log_writer.formatter
   end
 
   def test_log_formatter_custom_single
     cli = Puma::CLI.new [ "--config", "test/config/custom_log_formatter.rb" ]
-    assert_instance_of Proc, cli.launcher.events.formatter
-    assert_match(/^\[.*\] \[.*\] .*: test$/, cli.launcher.events.format('test'))
+    assert_instance_of Proc, cli.launcher.log_writer.formatter
+    assert_match(/^\[.*\] \[.*\] .*: test$/, cli.launcher.log_writer.format('test'))
   end
 
   def test_log_formatter_custom_clustered
     skip_unless :fork
 
     cli = Puma::CLI.new [ "--config", "test/config/custom_log_formatter.rb", "-w 2" ]
-    assert_instance_of Proc, cli.launcher.events.formatter
-    assert_match(/^\[.*\] \[.*\] .*: test$/, cli.launcher.events.format('test'))
+    assert_instance_of Proc, cli.launcher.log_writer.formatter
+    assert_match(/^\[.*\] \[.*\] .*: test$/, cli.launcher.log_writer.format('test'))
   end
 
   def test_state
@@ -398,7 +318,7 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new ["--state", @tmp_path, "--control-url", url]
     cli.launcher.write_state
 
-    data = YAML.load File.read(@tmp_path)
+    data = Psych.load_file @tmp_path
 
     assert_equal Process.pid, data["pid"]
     assert_equal url, data["control_url"]
@@ -434,7 +354,7 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new []
     cli.send(:setup_options)
 
-    assert_equal 'test', cli.instance_variable_get(:@conf).environment.call
+    assert_equal 'test', cli.instance_variable_get(:@conf).environment
   ensure
     ENV.delete 'APP_ENV'
     ENV.delete 'RAILS_ENV'
@@ -446,7 +366,7 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new []
     cli.send(:setup_options)
 
-    assert_equal @environment, cli.instance_variable_get(:@conf).environment.call
+    assert_equal @environment, cli.instance_variable_get(:@conf).environment
   end
 
   def test_environment_rails_env
@@ -456,8 +376,19 @@ class TestCLI < Minitest::Test
     cli = Puma::CLI.new []
     cli.send(:setup_options)
 
-    assert_equal @environment, cli.instance_variable_get(:@conf).environment.call
+    assert_equal @environment, cli.instance_variable_get(:@conf).environment
   ensure
     ENV.delete 'RAILS_ENV'
+  end
+
+  def test_silent
+    cli = Puma::CLI.new ['--silent']
+    cli.send(:setup_options)
+
+    log_writer = cli.instance_variable_get(:@log_writer)
+
+    assert_equal log_writer.class, Puma::LogWriter.null.class
+    assert_equal log_writer.stdout.class, Puma::NullIO
+    assert_equal log_writer.stderr, $stderr
   end
 end

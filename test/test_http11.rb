@@ -22,7 +22,7 @@ class Http11ParserTest < Minitest::Test
     assert nread == parser.nread, "Number read returned from execute does not match"
 
     assert_equal '/', req['REQUEST_PATH']
-    assert_equal 'HTTP/1.1', req['HTTP_VERSION']
+    assert_equal 'HTTP/1.1', req['SERVER_PROTOCOL']
     assert_equal '/?a=1', req['REQUEST_URI']
     assert_equal 'GET', req['REQUEST_METHOD']
     assert_nil req['FRAGMENT']
@@ -63,7 +63,7 @@ class Http11ParserTest < Minitest::Test
 
     assert_equal "GET", req['REQUEST_METHOD']
     assert_equal 'http://192.168.1.96:3000/api/v1/matches/test?1=1', req['REQUEST_URI']
-    assert_equal 'HTTP/1.1', req['HTTP_VERSION']
+    assert_equal 'HTTP/1.1', req['SERVER_PROTOCOL']
 
     assert_nil req['REQUEST_PATH']
     assert_nil req['FRAGMENT']
@@ -114,7 +114,6 @@ class Http11ParserTest < Minitest::Test
   end
 
   def test_semicolon_in_path
-    skip_if :jruby # Not yet supported on JRuby, see https://github.com/puma/puma/issues/1978
     parser = Puma::HttpParser.new
     req = {}
     get = "GET /forums/1/path;stillpath/2375?page=1 HTTP/1.1\r\n\r\n"
@@ -132,9 +131,9 @@ class Http11ParserTest < Minitest::Test
     res = count.to_s + "/"
 
     if readable
-      res << Digest::SHA1.hexdigest(rand(count * 100).to_s) * (count / 40)
+      res << Digest(:SHA1).hexdigest(rand(count * 100).to_s) * (count / 40)
     else
-      res << Digest::SHA1.digest(rand(count * 100).to_s) * (count / 20)
+      res << Digest(:SHA1).digest(rand(count * 100).to_s) * (count / 20)
     end
 
     res

@@ -30,6 +30,18 @@ typedef struct {
 
 VALUE eError;
 
+NORETURN(void raise_file_error(const char* caller, const char *filename));
+
+void raise_file_error(const char* caller, const char *filename) {
+  rb_raise(eError, "%s: error in file '%s': %s", caller, filename, ERR_error_string(ERR_get_error(), NULL));
+}
+
+NORETURN(void raise_param_error(const char* caller, const char *param));
+
+void raise_param_error(const char* caller, const char *param) {
+  rb_raise(eError, "%s: error with parameter '%s': %s", caller, param, ERR_error_string(ERR_get_error(), NULL));
+}
+
 void engine_free(void *ptr) {
   ms_conn *conn = ptr;
   ms_cert_buf* cert_buf = (ms_cert_buf*)SSL_get_app_data(conn->ssl);
@@ -49,7 +61,8 @@ const rb_data_type_t engine_data_type = {
     0, 0, RUBY_TYPED_FREE_IMMEDIATELY,
 };
 
-DH *get_dh2048() {
+#ifndef HAVE_SSL_CTX_SET_DH_AUTO
+DH *get_dh2048(void) {
   /* `openssl dhparam -C 2048`
    * -----BEGIN DH PARAMETERS-----
    * MIIBCAKCAQEAjmh1uQHdTfxOyxEbKAV30fUfzqMDF/ChPzjfyzl2jcrqQMhrk76o
@@ -91,13 +104,13 @@ DH *get_dh2048() {
   static unsigned char dh2048_g[] = { 0x02 };
 
   DH *dh;
-#if !(OPENSSL_VERSION_NUMBER < 0x10100005L || defined(LIBRESSL_VERSION_NUMBER))
+#if !(OPENSSL_VERSION_NUMBER < 0x10100005L)
   BIGNUM *p, *g;
 #endif
 
   dh = DH_new();
 
-#if OPENSSL_VERSION_NUMBER < 0x10100005L || defined(LIBRESSL_VERSION_NUMBER)
+#if OPENSSL_VERSION_NUMBER < 0x10100005L
   dh->p = BN_bin2bn(dh2048_p, sizeof(dh2048_p), NULL);
   dh->g = BN_bin2bn(dh2048_g, sizeof(dh2048_g), NULL);
 
@@ -119,6 +132,7 @@ DH *get_dh2048() {
 
   return dh;
 }
+#endif
 
 static void
 sslctx_free(void *ptr) {
@@ -177,6 +191,18 @@ static int engine_verify_callback(int preverify_ok, X509_STORE_CTX* ctx) {
   return preverify_ok;
 }
 
+static int password_callback(char *buf, int size, int rwflag, void *userdata) {
+    const char *password = (const char *) userdata;
+    size_t len = strlen(password);
+
+    if (len > (size_t) size) {
+      return 0;
+    }
+
+    memcpy(buf, password, len);
+    return (int) len;
+}
+
 static VALUE
 sslctx_alloc(VALUE klass) {
   SSL_CTX *ctx;
@@ -202,28 +228,42 @@ sslctx_alloc(VALUE klass) {
 VALUE
 sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
   SSL_CTX* ctx;
-
+  int ssl_options;
+  VALUE key, cert, ca, verify_mode, ssl_cipher_filter, no_tlsv1, no_tlsv1_1,
+    verification_flags, session_id_bytes, cert_pem, key_pem, key_password_command, key_password;
+  BIO *bio;
+  X509 *x509 = NULL;
+  EVP_PKEY *pkey;
+  pem_password_cb *password_cb = NULL;
+  const char *password = NULL;
 #ifdef HAVE_SSL_CTX_SET_MIN_PROTO_VERSION
   int min;
 #endif
-  int ssl_options;
-  VALUE key, cert, ca, verify_mode, ssl_cipher_filter, no_tlsv1, no_tlsv1_1,
-    verification_flags, session_id_bytes;
+#ifndef HAVE_SSL_CTX_SET_DH_AUTO
   DH *dh;
-
+#endif
 #if OPENSSL_VERSION_NUMBER < 0x10002000L
   EC_KEY *ecdh;
 #endif
+#ifdef HAVE_SSL_CTX_SET_SESSION_CACHE_MODE
+  VALUE reuse, reuse_cache_size, reuse_timeout;
 
-  TypedData_Get_Struct(self, SSL_CTX, &sslctx_type, ctx);
+  reuse = rb_funcall(mini_ssl_ctx, rb_intern_const("reuse"), 0);
+  reuse_cache_size = rb_funcall(mini_ssl_ctx, rb_intern_const("reuse_cache_size"), 0);
+  reuse_timeout = rb_funcall(mini_ssl_ctx, rb_intern_const("reuse_timeout"), 0);
+#endif
 
   key = rb_funcall(mini_ssl_ctx, rb_intern_const("key"), 0);
-  StringValue(key);
+
+  key_password_command = rb_funcall(mini_ssl_ctx, rb_intern_const("key_password_command"), 0);
 
   cert = rb_funcall(mini_ssl_ctx, rb_intern_const("cert"), 0);
-  StringValue(cert);
 
   ca = rb_funcall(mini_ssl_ctx, rb_intern_const("ca"), 0);
+
+  cert_pem = rb_funcall(mini_ssl_ctx, rb_intern_const("cert_pem"), 0);
+
+  key_pem = rb_funcall(mini_ssl_ctx, rb_intern_const("key_pem"), 0);
 
   verify_mode = rb_funcall(mini_ssl_ctx, rb_intern_const("verify_mode"), 0);
 
@@ -233,8 +273,110 @@ sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
 
   no_tlsv1_1 = rb_funcall(mini_ssl_ctx, rb_intern_const("no_tlsv1_1"), 0);
 
-  SSL_CTX_use_certificate_chain_file(ctx, RSTRING_PTR(cert));
-  SSL_CTX_use_PrivateKey_file(ctx, RSTRING_PTR(key), SSL_FILETYPE_PEM);
+  TypedData_Get_Struct(self, SSL_CTX, &sslctx_type, ctx);
+
+  if (!NIL_P(cert)) {
+    StringValue(cert);
+
+    if (SSL_CTX_use_certificate_chain_file(ctx, RSTRING_PTR(cert)) != 1) {
+      raise_file_error("SSL_CTX_use_certificate_chain_file", RSTRING_PTR(cert));
+    }
+  }
+
+  if (!NIL_P(key_password_command)) {
+      key_password = rb_funcall(mini_ssl_ctx, rb_intern_const("key_password"), 0);
+
+      if (!NIL_P(key_password)) {
+          StringValue(key_password);
+          password_cb = password_callback;
+          password = RSTRING_PTR(key_password);
+          SSL_CTX_set_default_passwd_cb(ctx, password_cb);
+          SSL_CTX_set_default_passwd_cb_userdata(ctx, (void *) password);
+      }
+  }
+
+  if (!NIL_P(key)) {
+    StringValue(key);
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, RSTRING_PTR(key), SSL_FILETYPE_PEM) != 1) {
+      raise_file_error("SSL_CTX_use_PrivateKey_file", RSTRING_PTR(key));
+    }
+  }
+
+  if (!NIL_P(cert_pem)) {
+    X509 *ca = NULL;
+    unsigned long err;
+
+    bio = BIO_new(BIO_s_mem());
+    BIO_puts(bio, RSTRING_PTR(cert_pem));
+
+    /**
+     * Much of this pulled as a simplified version of the `use_certificate_chain_file` method
+     * from openssl's `ssl_rsa.c` file.
+     */
+
+    /* first read the cert as the first item in the pem file */
+    x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    if (NULL == x509) {
+      BIO_free_all(bio);
+      raise_param_error("PEM_read_bio_X509", "cert_pem");
+    }
+
+    /* Add the cert to the context */
+    /* 1 is success - otherwise check the error codes */
+    if (1 != SSL_CTX_use_certificate(ctx, x509)) {
+      BIO_free_all(bio);
+      raise_param_error("SSL_CTX_use_certificate", "cert_pem");
+    }
+
+    X509_free(x509); /* no longer need our reference */
+
+    /* Now lets load up the rest of the certificate chain */
+    /* 1 is success 0 is error */
+    if (0 == SSL_CTX_clear_chain_certs(ctx)) {
+      BIO_free_all(bio);
+      raise_param_error("SSL_CTX_clear_chain_certs","cert_pem");
+    }
+
+    while (1) {
+      ca = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+
+      if (NULL == ca) {
+        break;
+      }
+
+      if (0 == SSL_CTX_add0_chain_cert(ctx, ca)) {
+        BIO_free_all(bio);
+        raise_param_error("SSL_CTX_add0_chain_cert","cert_pem");
+      }
+      /* don't free ca - its now owned by the context */
+    }
+
+    /* ca is NULL - so its either the end of the file or an error */
+    err = ERR_peek_last_error();
+
+    /* If its the end of the file - then we are done, in any case free the bio */
+    BIO_free_all(bio);
+
+    if ((ERR_GET_LIB(err) == ERR_LIB_PEM) && (ERR_GET_REASON(err) == PEM_R_NO_START_LINE)) {
+      ERR_clear_error();
+    } else {
+      raise_param_error("PEM_read_bio_X509","cert_pem");
+    }
+  }
+
+  if (!NIL_P(key_pem)) {
+    bio = BIO_new(BIO_s_mem());
+    BIO_puts(bio, RSTRING_PTR(key_pem));
+    pkey = PEM_read_bio_PrivateKey(bio, NULL, password_cb, (void *) password);
+
+    if (SSL_CTX_use_PrivateKey(ctx, pkey) != 1) {
+      BIO_free(bio);
+      raise_file_error("SSL_CTX_use_PrivateKey", RSTRING_PTR(key_pem));
+    }
+    EVP_PKEY_free(pkey);
+    BIO_free(bio);
+  }
 
   verification_flags = rb_funcall(mini_ssl_ctx, rb_intern_const("verification_flags"), 0);
 
@@ -246,7 +388,9 @@ sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
 
   if (!NIL_P(ca)) {
     StringValue(ca);
-    SSL_CTX_load_verify_locations(ctx, RSTRING_PTR(ca), NULL);
+    if (SSL_CTX_load_verify_locations(ctx, RSTRING_PTR(ca), NULL) != 1) {
+      raise_file_error("SSL_CTX_load_verify_locations", RSTRING_PTR(ca));
+    }
   }
 
   ssl_options = SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_SINGLE_ECDH_USE | SSL_OP_NO_COMPRESSION;
@@ -264,8 +408,6 @@ sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
 
   SSL_CTX_set_min_proto_version(ctx, min);
 
-  SSL_CTX_set_options(ctx, ssl_options);
-
 #else
   /* As of 1.0.2f, SSL_OP_SINGLE_DH_USE key use is always on */
   ssl_options |= SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_SINGLE_DH_USE;
@@ -276,10 +418,23 @@ sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
   if(RTEST(no_tlsv1_1)) {
     ssl_options |= SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1;
   }
-  SSL_CTX_set_options(ctx, ssl_options);
 #endif
 
-  SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+#ifdef HAVE_SSL_CTX_SET_SESSION_CACHE_MODE
+  if (!NIL_P(reuse)) {
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_SERVER);
+    if (!NIL_P(reuse_cache_size)) {
+      SSL_CTX_sess_set_cache_size(ctx, NUM2INT(reuse_cache_size));
+    }
+    if (!NIL_P(reuse_timeout)) {
+      SSL_CTX_set_timeout(ctx, NUM2INT(reuse_timeout));
+    }
+  } else {
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+  }
+#endif
+
+  SSL_CTX_set_options(ctx, ssl_options);
 
   if (!NIL_P(ssl_cipher_filter)) {
     StringValue(ssl_cipher_filter);
@@ -289,12 +444,8 @@ sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
     SSL_CTX_set_cipher_list(ctx, "HIGH:!aNULL@STRENGTH");
   }
 
-  dh = get_dh2048();
-  SSL_CTX_set_tmp_dh(ctx, dh);
-
 #if OPENSSL_VERSION_NUMBER < 0x10002000L
-  // Remove this case if OpenSSL 1.0.1 (now EOL) support is no
-  // longer needed.
+  // Remove this case if OpenSSL 1.0.1 (now EOL) support is no longer needed.
   ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
   if (ecdh) {
     SSL_CTX_set_tmp_ecdh(ctx, ecdh);
@@ -325,6 +476,15 @@ sslctx_initialize(VALUE self, VALUE mini_ssl_ctx) {
                                  SSL_MAX_SSL_SESSION_ID_LENGTH);
 
   // printf("\ninitialize end security_level %d\n", SSL_CTX_get_security_level(ctx));
+
+#ifdef HAVE_SSL_CTX_SET_DH_AUTO
+  // https://www.openssl.org/docs/man3.0/man3/SSL_CTX_set_dh_auto.html
+  SSL_CTX_set_dh_auto(ctx, 1);
+#else
+  dh = get_dh2048();
+  SSL_CTX_set_tmp_dh(ctx, dh);
+#endif
+
   rb_obj_freeze(self);
   return self;
 }
@@ -386,7 +546,7 @@ NORETURN(void raise_error(SSL* ssl, int result));
 
 void raise_error(SSL* ssl, int result) {
   char buf[512];
-  char msg[512];
+  char msg[768];
   const char* err_str;
   int err = errno;
   int mask = 4095;
@@ -523,7 +683,11 @@ VALUE engine_peercert(VALUE self) {
 
   TypedData_Get_Struct(self, ms_conn, &engine_data_type, conn);
 
+#ifdef HAVE_SSL_GET1_PEER_CERTIFICATE
+  cert = SSL_get1_peer_certificate(conn->ssl);
+#else
   cert = SSL_get_peer_certificate(conn->ssl);
+#endif
   if(!cert) {
     /*
      * See if there was a failed certificate associated with this client.
@@ -580,7 +744,10 @@ void Init_mini_ssl(VALUE puma) {
   ERR_load_crypto_strings();
 
   mod = rb_define_module_under(puma, "MiniSSL");
+
   eng = rb_define_class_under(mod, "Engine", rb_cObject);
+  rb_undef_alloc_func(eng);
+
   sslctx = rb_define_class_under(mod, "SSLContext", rb_cObject);
   rb_define_alloc_func(sslctx, sslctx_alloc);
   rb_define_method(sslctx, "initialize", sslctx_initialize, 1);
@@ -637,6 +804,10 @@ void Init_mini_ssl(VALUE puma) {
 
   rb_define_method(eng, "init?", engine_init, 0);
 
+  /* @!attribute [r] peercert
+   * Returns `nil` when `MiniSSL::Context#verify_mode` is set to `VERIFY_NONE`.
+   * @return [String, nil] DER encoded cert
+   */
   rb_define_method(eng, "peercert", engine_peercert, 0);
 
   rb_define_method(eng, "ssl_vers_st", engine_ssl_vers_st, 0);

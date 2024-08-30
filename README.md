@@ -4,21 +4,23 @@
 
 # Puma: A Ruby Web Server Built For Parallelism
 
-[![Actions MRI](https://github.com/puma/puma/workflows/MRI/badge.svg?branch=master)](https://github.com/puma/puma/actions?query=workflow%3AMRI)
-[![Actions non MRI](https://github.com/puma/puma/workflows/non_MRI/badge.svg?branch=master)](https://github.com/puma/puma/actions?query=workflow%3Anon_MRI)
+[![Actions](https://github.com/puma/puma/workflows/Tests/badge.svg?branch=master)](https://github.com/puma/puma/actions?query=workflow%3ATests)
 [![Code Climate](https://codeclimate.com/github/puma/puma.svg)](https://codeclimate.com/github/puma/puma)
-[![SemVer](https://api.dependabot.com/badges/compatibility_score?dependency-name=puma&package-manager=bundler&version-scheme=semver)](https://dependabot.com/compatibility-score.html?dependency-name=puma&package-manager=bundler&version-scheme=semver)
 [![StackOverflow](https://img.shields.io/badge/stackoverflow-Puma-blue.svg)]( https://stackoverflow.com/questions/tagged/puma )
 
 Puma is a **simple, fast, multi-threaded, and highly parallel HTTP 1.1 server for Ruby/Rack applications**.
 
 ## Built For Speed &amp; Parallelism
 
-Puma processes requests using a C-optimized Ragel extension (inherited from Mongrel) that provides fast, accurate HTTP 1.1 protocol parsing in a portable way. Puma then serves the request using a thread pool. Each request is served in a separate thread, so truly parallel Ruby implementations (JRuby, Rubinius) will use all available CPU cores.
+Puma is a server for [Rack](https://github.com/rack/rack)-powered HTTP applications written in Ruby.  It is: 
+* **Multi-threaded**. Each request is served in a separate thread. This helps you serve more requests per second with less memory use.
+* **Multi-process**. "Pre-forks" in cluster mode, using less memory per-process thanks to copy-on-write memory.
+* **Standalone**. With SSL support, zero-downtime rolling restarts and a built-in request bufferer, you can deploy Puma without any reverse proxy.
+* **Battle-tested**. Our HTTP parser is inherited from Mongrel and has over 15 years of production use. Puma is currently the most popular Ruby webserver, and is the default server for Ruby on Rails.
 
 Originally designed as a server for [Rubinius](https://github.com/rubinius/rubinius), Puma also works well with Ruby (MRI) and JRuby.
 
-On MRI, there is a Global VM Lock (GVL) that ensures only one thread can run Ruby code at a time. But if you're doing a lot of blocking IO (such as HTTP calls to external APIs like Twitter), Puma still improves MRI's throughput by allowing IO waiting to be done in parallel.
+On MRI, there is a Global VM Lock (GVL) that ensures only one thread can run Ruby code at a time. But if you're doing a lot of blocking IO (such as HTTP calls to external APIs like Twitter), Puma still improves MRI's throughput by allowing IO waiting to be done in parallel. Truly parallel Ruby implementations (TruffleRuby, JRuby) don't have this limitation.
 
 ## Quick Start
 
@@ -108,15 +110,25 @@ Puma also offers "clustered mode". Clustered mode `fork`s workers from a master 
 $ puma -t 8:32 -w 3
 ```
 
+Or with the `WEB_CONCURRENCY` environment variable:
+
+```
+$ WEB_CONCURRENCY=3 puma -t 8:32
+```
+
 Note that threads are still used in clustered mode, and the `-t` thread flag setting is per worker, so `-w 2 -t 16:16` will spawn 32 threads in total, with 16 in each worker process.
 
-In clustered mode, Puma can "preload" your application. This loads all the application code *prior* to forking. Preloading reduces total memory usage of your application via an operating system feature called [copy-on-write](https://en.wikipedia.org/wiki/Copy-on-write) (Ruby 2.0+ only). Use the `--preload` flag from the command line:
+For an in-depth discussion of the tradeoffs of thread and process count settings, [see our docs](https://github.com/puma/puma/blob/9282a8efa5a0c48e39c60d22ca70051a25df9f55/docs/kubernetes.md#workers-per-pod-and-other-config-issues).
+
+In clustered mode, Puma can "preload" your application. This loads all the application code *prior* to forking. Preloading reduces total memory usage of your application via an operating system feature called [copy-on-write](https://en.wikipedia.org/wiki/Copy-on-write).
+
+If the `WEB_CONCURRENCY` environment variable is set to a value > 1 (and `--prune-bundler` has not been specified), preloading will be enabled by default. Otherwise, you can use the `--preload` flag from the command line:
 
 ```
 $ puma -w 3 --preload
 ```
 
-If you're using a configuration file, use the `preload_app!` method:
+Or, if you're using a configuration file, you can use the `preload_app!` method:
 
 ```ruby
 # config/puma.rb
@@ -124,7 +136,9 @@ workers 3
 preload_app!
 ```
 
-Additionally, you can specify a block in your configuration file that will be run on boot of each worker:
+Preloading can’t be used with phased restart, since phased restart kills and restarts workers one-by-one, and preloading copies the code of master into the workers.
+
+When using clustered mode, you can specify a block in your configuration file that will be run on boot of each worker:
 
 ```ruby
 # config/puma.rb
@@ -137,7 +151,10 @@ This code can be used to setup the process before booting the application, allow
 you to do some Puma-specific things that you don't want to embed in your application.
 For instance, you could fire a log notification that a worker booted or send something to statsd. This can be called multiple times.
 
-`before_fork` specifies a block to be run before workers are forked:
+Constants loaded by your application (such as `Rails`) will not be available in `on_worker_boot`
+unless preloading is enabled.
+
+You can also specify a block to be run before workers are forked, using `before_fork`:
 
 ```ruby
 # config/puma.rb
@@ -146,7 +163,14 @@ before_fork do
 end
 ```
 
-Preloading can’t be used with phased restart, since phased restart kills and restarts workers one-by-one, and `preload_app!` copies the code of master into the workers.
+You can also specify a block to be run after puma is booted using `on_booted`:
+
+```ruby
+# config/puma.rb
+on_booted do
+  # configuration here
+end
+```
 
 ### Error handling
 
@@ -187,35 +211,38 @@ Need a bit of security? Use SSL sockets:
 ```
 $ puma -b 'ssl://127.0.0.1:9292?key=path_to_key&cert=path_to_cert'
 ```
-#### Self-signed SSL certificates (via the [`localhost`] gem, for development use): 
+#### Self-signed SSL certificates (via the [`localhost`] gem, for development use):
 
-Puma supports the [`localhost`] gem for self-signed certificates. This is particularly useful if you want to use Puma with SSL locally, and self-signed certificates will work for your use-case. Currently, the integration can only be used in MRI. 
+Puma supports the [`localhost`] gem for self-signed certificates. This is particularly useful if you want to use Puma with SSL locally, and self-signed certificates will work for your use-case. Currently, the integration can only be used in MRI.
 
 Puma automatically configures SSL when the [`localhost`] gem is loaded in a `development` environment:
 
+Add the gem to your Gemfile:
 ```ruby
-# Add the gem to your Gemfile
-group(:development) do 
+group(:development) do
   gem 'localhost'
 end
+```
 
-# And require it implicitly using bundler
+And require it implicitly using bundler:
+```ruby
 require "bundler"
 Bundler.require(:default, ENV["RACK_ENV"].to_sym)
+```
 
-# Alternatively, you can require the gem in config.ru:
-require './app'
+Alternatively, you can require the gem in your configuration file, either `config/puma/development.rb`, `config/puma.rb`, or set via the `-C` cli option:
+```ruby
 require 'localhost'
-run Sinatra::Application
+# configuration methods (from Puma::DSL) as needed
 ```
 
 Additionally, Puma must be listening to an SSL socket:
 
 ```shell
-$ puma -b 'ssl://localhost:9292' config.ru
+$ puma -b 'ssl://localhost:9292' -C config/use_local_host.rb
 
 # The following options allow you to reach Puma over HTTP as well:
-$ puma -b ssl://localhost:9292 -b tcp://localhost:9393 config.ru
+$ puma -b ssl://localhost:9292 -b tcp://localhost:9393 -C config/use_local_host.rb
 ```
 
 [`localhost`]: https://github.com/socketry/localhost
@@ -260,6 +287,30 @@ $ puma -b 'ssl://127.0.0.1:9292?key=path_to_key&cert=path_to_cert&verification_f
 
 List of available flags: `USE_CHECK_TIME`, `CRL_CHECK`, `CRL_CHECK_ALL`, `IGNORE_CRITICAL`, `X509_STRICT`, `ALLOW_PROXY_CERTS`, `POLICY_CHECK`, `EXPLICIT_POLICY`, `INHIBIT_ANY`, `INHIBIT_MAP`, `NOTIFY_POLICY`, `EXTENDED_CRL_SUPPORT`, `USE_DELTAS`, `CHECK_SS_SIGNATURE`, `TRUSTED_FIRST`, `SUITEB_128_LOS_ONLY`, `SUITEB_192_LOS`, `SUITEB_128_LOS`, `PARTIAL_CHAIN`, `NO_ALT_CHAINS`, `NO_CHECK_TIME`
 (see https://www.openssl.org/docs/manmaster/man3/X509_VERIFY_PARAM_set_hostflags.html#VERIFICATION-FLAGS).
+
+#### Controlling OpenSSL Password Decryption
+
+To enable runtime decryption of an encrypted SSL key (not available for JRuby), use `key_password_command`:
+
+```
+$ puma -b 'ssl://127.0.0.1:9292?key=path_to_key&cert=path_to_cert&key_password_command=/path/to/command.sh'
+```
+
+`key_password_command` must:
+
+1. Be executable by Puma.
+2. Print the decryption password to stdout.
+
+ For example:
+
+```shell
+#!/bin/sh
+
+echo "this is my password"
+```
+
+`key_password_command` can be used with `key` or `key_pem`. If the key
+is not encrypted, the executable will not be called.
 
 ### Control/Status Server
 
@@ -336,16 +387,18 @@ end
 
 ## Deployment
 
-Puma has support for Capistrano with an [external gem](https://github.com/seuros/capistrano-puma).
+ * Puma has support for Capistrano with an [external gem](https://github.com/seuros/capistrano-puma).
+
+ * Additionally, Puma has support for built-in daemonization via the [puma-daemon](https://github.com/kigster/puma-daemon) ruby gem. The gem restores the `daemonize` option that was removed from Puma starting version 5, but only for MRI Ruby.
+
 
 It is common to use process monitors with Puma. Modern process monitors like systemd or rc.d
-provide continuous monitoring and restarts for increased
-reliability in production environments:
+provide continuous monitoring and restarts for increased reliability in production environments:
 
 * [rc.d](docs/jungle/rc.d/README.md)
 * [systemd](docs/systemd.md)
 
-Community guides: 
+Community guides:
 
 * [Deploying Puma on OpenBSD using relayd and httpd](https://gist.github.com/anon987654321/4532cf8d6c59c1f43ec8973faa031103)
 
@@ -355,7 +408,9 @@ Community guides:
 
 * [puma-metrics](https://github.com/harmjanblok/puma-metrics) — export Puma metrics to Prometheus
 * [puma-plugin-statsd](https://github.com/yob/puma-plugin-statsd) — send Puma metrics to statsd
-* [puma-plugin-systemd](https://github.com/sj26/puma-plugin-systemd) — deeper integration with systemd for notify, status and watchdog
+* [puma-plugin-systemd](https://github.com/sj26/puma-plugin-systemd) — deeper integration with systemd for notify, status and watchdog. Puma 5.1.0 integrated notify and watchdog, which probably conflicts with this plugin. Puma 6.1.0 added status support which obsoletes the plugin entirely.
+* [puma-plugin-telemetry](https://github.com/babbel/puma-plugin-telemetry) - telemetry plugin for Puma offering various targets to publish
+* [puma-acme](https://github.com/anchordotdev/puma-acme) - automatic SSL/HTTPS certificate provisioning and setup
 
 ### Monitoring
 
