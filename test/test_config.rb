@@ -4,7 +4,8 @@ require_relative "helper"
 require_relative "helpers/config_file"
 
 require "puma/configuration"
-require 'puma/events'
+require 'puma/log_writer'
+require 'rack'
 
 class TestConfigFile < TestConfigFileBase
   parallelize_me!
@@ -12,13 +13,20 @@ class TestConfigFile < TestConfigFileBase
   def test_default_max_threads
     max_threads = 16
     max_threads = 5 if RUBY_ENGINE.nil? || RUBY_ENGINE == 'ruby'
-    assert_equal max_threads, Puma::Configuration.new.default_max_threads
+    assert_equal max_threads, Puma::Configuration.new.options.default_options[:max_threads]
   end
 
-
   def test_app_from_rackup
+    if Rack.release >= '3'
+      fn = "test/rackup/hello-bind_rack3.ru"
+      bind = "tcp://0.0.0.0:9292"
+    else
+      fn = "test/rackup/hello-bind.ru"
+      bind = "tcp://127.0.0.1:9292"
+    end
+
     conf = Puma::Configuration.new do |c|
-      c.rackup "test/rackup/hello-bind.ru"
+      c.rackup fn
     end
     conf.load
 
@@ -28,7 +36,9 @@ class TestConfigFile < TestConfigFileBase
       conf.app
     end
 
-    assert_equal ["tcp://127.0.0.1:9292"], conf.options[:binds]
+    assert_equal [200, {"Content-Type"=>"text/plain"}, ["Hello World"]], conf.app.call({})
+
+    assert_equal [bind], conf.options[:binds]
   end
 
   def test_app_from_app_DSL
@@ -54,9 +64,22 @@ class TestConfigFile < TestConfigFileBase
     app = conf.app
 
     assert bind_configuration =~ %r{ca=.*ca.crt}
-    assert bind_configuration =~ /verify_mode=peer/
+    assert bind_configuration&.include?('verify_mode=peer')
 
     assert_equal [200, {}, ["embedded app"]], app.call({})
+  end
+
+  def test_ssl_self_signed_configuration_from_DSL
+    skip_if :jruby
+    skip_unless :ssl
+    conf = Puma::Configuration.new do |config|
+      config.load "test/config/ssl_self_signed_config.rb"
+    end
+
+    conf.load
+
+    ssl_binding = "ssl://0.0.0.0:9292?&verify_mode=none"
+    assert_equal [ssl_binding], conf.options[:binds]
   end
 
   def test_ssl_bind
@@ -73,11 +96,123 @@ class TestConfigFile < TestConfigFileBase
 
     conf.load
 
-    ssl_binding = "ssl://0.0.0.0:9292?cert=/path/to/cert&key=/path/to/key&verify_mode=the_verify_mode"
+    ssl_binding = "ssl://0.0.0.0:9292?cert=%2Fpath%2Fto%2Fcert&key=%2Fpath%2Fto%2Fkey&verify_mode=the_verify_mode"
     assert_equal [ssl_binding], conf.options[:binds]
   end
 
+  def test_ssl_bind_with_escaped_filenames
+    skip_if :jruby
+    skip_unless :ssl
+
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+        cert: "/path/to/cert+1",
+        ca: "/path/to/ca+1",
+        key: "/path/to/key+1",
+        verify_mode: :peer
+      }
+    end
+
+    conf.load
+
+    ssl_binding = "ssl://0.0.0.0:9292?cert=%2Fpath%2Fto%2Fcert%2B1&key=%2Fpath%2Fto%2Fkey%2B1&verify_mode=peer&ca=%2Fpath%2Fto%2Fca%2B1"
+    assert_equal [ssl_binding], conf.options[:binds]
+  end
+
+  def test_ssl_bind_with_cert_and_key_pem
+    skip_if :jruby
+    skip_unless :ssl
+
+    cert_path = File.expand_path "../examples/puma/client-certs", __dir__
+    cert_pem = File.read("#{cert_path}/server.crt")
+    key_pem = File.read("#{cert_path}/server.key")
+
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+        cert_pem: cert_pem,
+        key_pem: key_pem,
+        verify_mode: "the_verify_mode",
+      }
+    end
+
+    conf.load
+
+    ssl_binding = "ssl://0.0.0.0:9292?cert=store%3A0&key=store%3A1&verify_mode=the_verify_mode"
+    assert_equal [ssl_binding], conf.options[:binds]
+  end
+
+  def test_ssl_bind_with_backlog
+    skip_unless :ssl
+
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+        backlog: "2048",
+      }
+    end
+
+    conf.load
+
+    ssl_binding = conf.options[:binds].first
+    assert ssl_binding.include?('&backlog=2048')
+  end
+
+  def test_ssl_bind_with_low_latency_true
+    skip_unless :ssl
+    skip_if :jruby
+
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+        low_latency: true
+      }
+    end
+
+    conf.load
+
+    ssl_binding = conf.options[:binds].first
+    assert ssl_binding.include?('&low_latency=true')
+  end
+
+  def test_ssl_bind_with_low_latency_false
+    skip_unless :ssl
+    skip_if :jruby
+
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+        low_latency: false
+      }
+    end
+
+    conf.load
+
+    ssl_binding = conf.options[:binds].first
+    assert ssl_binding.include?('&low_latency=false')
+  end
+
   def test_ssl_bind_jruby
+    skip_unless :jruby
+    skip_unless :ssl
+
+    ciphers = "TLS_DHE_RSA_WITH_AES_128_CBC_SHA,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+          keystore: "/path/to/keystore",
+          keystore_pass: "password",
+          cipher_suites: ciphers,
+          protocols: 'TLSv1.2',
+          verify_mode: "the_verify_mode"
+      }
+    end
+
+    conf.load
+
+    ssl_binding = "ssl://0.0.0.0:9292?keystore=/path/to/keystore" \
+      "&keystore-pass=password&cipher_suites=#{ciphers}&protocols=TLSv1.2" \
+      "&verify_mode=the_verify_mode"
+    assert_equal [ssl_binding], conf.options[:binds]
+  end
+
+  def test_ssl_bind_jruby_with_ssl_cipher_list
     skip_unless :jruby
     skip_unless :ssl
 
@@ -100,8 +235,29 @@ class TestConfigFile < TestConfigFileBase
     assert_equal [ssl_binding], conf.options[:binds]
   end
 
+  def test_ssl_bind_jruby_with_truststore
+    skip_unless :jruby
+    skip_unless :ssl
 
+    conf = Puma::Configuration.new do |c|
+      c.ssl_bind "0.0.0.0", "9292", {
+          keystore: "/path/to/keystore",
+          keystore_type: "pkcs12",
+          keystore_pass: "password",
+          truststore: "default",
+          truststore_type: "jks",
+          verify_mode: "none"
+      }
+    end
 
+    conf.load
+
+    ssl_binding = "ssl://0.0.0.0:9292?keystore=/path/to/keystore" \
+      "&keystore-pass=password&keystore-type=pkcs12" \
+      "&truststore=default&truststore-type=jks" \
+      "&verify_mode=none"
+    assert_equal [ssl_binding], conf.options[:binds]
+  end
 
   def test_ssl_bind_no_tlsv1_1
     skip_if :jruby
@@ -118,7 +274,7 @@ class TestConfigFile < TestConfigFileBase
 
     conf.load
 
-    ssl_binding = "ssl://0.0.0.0:9292?cert=/path/to/cert&key=/path/to/key&verify_mode=the_verify_mode&no_tlsv1_1=true"
+    ssl_binding = "ssl://0.0.0.0:9292?cert=%2Fpath%2Fto%2Fcert&key=%2Fpath%2Fto%2Fkey&verify_mode=the_verify_mode&no_tlsv1_1=true"
     assert_equal [ssl_binding], conf.options[:binds]
   end
 
@@ -173,8 +329,8 @@ class TestConfigFile < TestConfigFileBase
     conf.load
 
     ssl_binding = conf.options[:binds].first
-    assert_match "ca=/path/to/ca", ssl_binding
-    assert_match "verify_mode=peer", ssl_binding
+    assert_includes ssl_binding, Puma::Util.escape("/path/to/ca")
+    assert_includes ssl_binding, "verify_mode=peer"
   end
 
   def test_lowlevel_error_handler_DSL
@@ -299,22 +455,40 @@ class TestConfigFile < TestConfigFileBase
 
   def test_run_hooks_before_worker_fork
     assert_run_hooks :before_worker_fork, configured_with: :on_worker_fork
+
+    assert_warning_for_hooks_defined_in_single_mode :on_worker_fork
   end
 
   def test_run_hooks_after_worker_fork
     assert_run_hooks :after_worker_fork
+
+    assert_warning_for_hooks_defined_in_single_mode :after_worker_fork
   end
 
   def test_run_hooks_before_worker_boot
     assert_run_hooks :before_worker_boot, configured_with: :on_worker_boot
+
+    assert_warning_for_hooks_defined_in_single_mode :on_worker_boot
   end
 
   def test_run_hooks_before_worker_shutdown
     assert_run_hooks :before_worker_shutdown, configured_with: :on_worker_shutdown
+
+    assert_warning_for_hooks_defined_in_single_mode :on_worker_shutdown
   end
 
   def test_run_hooks_before_fork
     assert_run_hooks :before_fork
+
+    assert_warning_for_hooks_defined_in_single_mode :before_fork
+  end
+
+  def test_run_hooks_before_thread_start
+    assert_run_hooks :before_thread_start, configured_with: :on_thread_start
+  end
+
+  def test_run_hooks_before_thread_exit
+    assert_run_hooks :before_thread_exit, configured_with: :on_thread_exit
   end
 
   def test_run_hooks_and_exception
@@ -324,11 +498,11 @@ class TestConfigFile < TestConfigFileBase
       end
     end
     conf.load
-    events = Puma::Events.strings
+    log_writer = Puma::LogWriter.strings
 
-    conf.run_hooks :on_restart, 'ARG', events
+    conf.run_hooks(:on_restart, 'ARG', log_writer)
     expected = /WARNING hook on_restart failed with exception \(RuntimeError\) Error from hook/
-    assert_match expected, events.stdout.string
+    assert_match expected, log_writer.stdout.string
   end
 
   def test_config_does_not_load_workers_by_default
@@ -358,6 +532,30 @@ class TestConfigFile < TestConfigFileBase
     assert_equal true, conf.options[:silence_single_worker_warning]
   end
 
+  def test_silence_fork_callback_warning_default
+    conf = Puma::Configuration.new
+    conf.load
+
+    assert_equal false, conf.options[:silence_fork_callback_warning]
+  end
+
+  def test_silence_fork_callback_warning_overwrite
+    conf = Puma::Configuration.new do |c|
+      c.silence_fork_callback_warning
+    end
+    conf.load
+
+    assert_equal true, conf.options[:silence_fork_callback_warning]
+  end
+
+  def test_http_content_length_limit
+    assert_nil Puma::Configuration.new.options.default_options[:http_content_length_limit]
+
+    conf = Puma::Configuration.new({ http_content_length_limit: 10000})
+
+    assert_equal 10000, conf.final_options[:http_content_length_limit]
+  end
+
   private
 
   def assert_run_hooks(hook_name, options = {})
@@ -365,17 +563,21 @@ class TestConfigFile < TestConfigFileBase
 
     # test single, not an array
     messages = []
-    conf = Puma::Configuration.new
+    conf = Puma::Configuration.new do |c|
+      c.silence_fork_callback_warning
+    end
     conf.options[hook_name] = -> (a) {
       messages << "#{hook_name} is called with #{a}"
     }
 
-    conf.run_hooks hook_name, 'ARG', Puma::Events.strings
+    conf.run_hooks(hook_name, 'ARG', Puma::LogWriter.strings)
     assert_equal messages, ["#{hook_name} is called with ARG"]
 
     # test multiple
     messages = []
     conf = Puma::Configuration.new do |c|
+      c.silence_fork_callback_warning
+
       c.send(configured_with) do |a|
         messages << "#{hook_name} is called with #{a} one time"
       end
@@ -386,8 +588,30 @@ class TestConfigFile < TestConfigFileBase
     end
     conf.load
 
-    conf.run_hooks hook_name, 'ARG', Puma::Events.strings
+    conf.run_hooks(hook_name, 'ARG', Puma::LogWriter.strings)
     assert_equal messages, ["#{hook_name} is called with ARG one time", "#{hook_name} is called with ARG a second time"]
+  end
+
+  def assert_warning_for_hooks_defined_in_single_mode(hook_name)
+    out, _ = capture_io do
+      Puma::Configuration.new do |c|
+        c.send(hook_name)
+      end
+    end
+
+    assert_match "your `#{hook_name}` block did not run\n", out
+  end
+end
+
+# contains tests that cannot run parallel
+class TestConfigFileSingle < TestConfigFileBase
+  def test_custom_logger_from_DSL
+    conf = Puma::Configuration.new { |c| c.load 'test/config/custom_logger.rb' }
+
+    conf.load
+    out, _ = capture_subprocess_io { conf.options[:custom_logger].write 'test' }
+
+    assert_equal "Custom logging: test\n", out
   end
 end
 
@@ -397,7 +621,7 @@ class TestEnvModifificationConfig < TestConfigFileBase
     port = (rand(10_000) + 30_000).to_s
     with_env("PORT" => port) do
       conf = Puma::Configuration.new do |user_config, file_config, default_config|
-        user_config.bind "tcp://#{Puma::Configuration::DefaultTCPHost}:#{port}"
+        user_config.bind "tcp://#{Puma::Configuration::DEFAULTS[:tcp_host]}:#{port}"
         file_config.load "test/config/app.rb"
       end
 
@@ -424,7 +648,6 @@ class TestConfigEnvVariables < TestConfigFileBase
 
   def test_config_loads_correct_max_threads
     conf = Puma::Configuration.new
-    assert_equal conf.default_max_threads, conf.options.default_options[:max_threads]
 
     with_env("MAX_THREADS" => "7") do
       conf = Puma::Configuration.new

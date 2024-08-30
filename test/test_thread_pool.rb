@@ -5,17 +5,25 @@ require "puma/thread_pool"
 class TestThreadPool < Minitest::Test
 
   def teardown
-    @pool.shutdown(1) if @pool
+    @pool.shutdown(1) if defined?(@pool)
   end
 
   def new_pool(min, max, &block)
     block = proc { } unless block
-    @pool = Puma::ThreadPool.new('test', min, max, &block)
+    options = {
+      min_threads: min,
+      max_threads: max
+    }
+    @pool = Puma::ThreadPool.new('tst', options, &block)
   end
 
   def mutex_pool(min, max, &block)
     block = proc { } unless block
-    @pool = MutexPool.new('test', min, max, &block)
+    options = {
+      min_threads: min,
+      max_threads: max
+    }
+    @pool = MutexPool.new('tst', options, &block)
   end
 
   # Wraps ThreadPool work in mutex for better concurrency control.
@@ -27,7 +35,7 @@ class TestThreadPool < Minitest::Test
       work = [work] unless work.is_a?(Array)
       with_mutex do
         work.each {|arg| super arg}
-        yield if block_given?
+        yield if block
         @not_full.wait(@mutex)
       end
     end
@@ -59,7 +67,32 @@ class TestThreadPool < Minitest::Test
     thread_name = nil
     pool = mutex_pool(0, 1) {thread_name = Thread.current.name}
     pool << 1
-    assert_equal('puma test threadpool 001', thread_name)
+    assert_equal('puma tst tp 001', thread_name)
+  end
+
+  def test_thread_name_linux
+    skip 'Thread.name not supported' unless Thread.current.respond_to?(:name)
+
+    task_dir = File.join('', 'proc', Process.pid.to_s, 'task')
+    skip 'This test only works under Linux and MRI Ruby with appropriate permissions' if !(File.directory?(task_dir) && File.readable?(task_dir) && Puma::IS_MRI)
+
+    expected_thread_name = 'puma tst tp 001'
+    found_thread = false
+    pool = mutex_pool(0, 1) do
+      # Read every /proc/<pid>/task/<tid>/comm file to find the thread name
+      Dir.entries(task_dir).select {|tid| File.directory?(File.join(task_dir, tid))}.each do |tid|
+        comm_file = File.join(task_dir, tid, 'comm')
+        next unless File.file?(comm_file) && File.readable?(comm_file)
+
+        if File.read(comm_file).strip == expected_thread_name
+          found_thread = true
+          break
+        end
+      end
+    end
+    pool << 1
+
+    assert(found_thread, "Did not find thread with name '#{expected_thread_name}'")
   end
 
   def test_converts_pool_sizes
@@ -82,6 +115,26 @@ class TestThreadPool < Minitest::Test
     pool << 3
 
     assert_equal 3, pool.backlog
+  end
+
+  def test_thread_start_hook
+    started = Queue.new
+    options = {
+      min_threads: 0,
+      max_threads: 1,
+      before_thread_start: [
+        proc do
+          started << 1
+        end
+      ]
+    }
+    block = proc { }
+    pool = MutexPool.new('tst', options, &block)
+
+    pool << 1
+
+    assert_equal 1, pool.spawned
+    assert_equal 1, started.length
   end
 
   def test_trim
@@ -134,6 +187,29 @@ class TestThreadPool < Minitest::Test
     assert_equal 0, pool.trim_requested
   end
 
+  def test_trim_thread_exit_hook
+    exited = Queue.new
+    options = {
+      min_threads: 0,
+      max_threads: 1,
+      before_thread_exit: [
+        proc do
+          exited << 1
+        end
+      ]
+    }
+    block = proc { }
+    pool = MutexPool.new('tst', options, &block)
+
+    pool << 1
+
+    assert_equal 1, pool.spawned
+
+    pool.trim
+    assert_equal 0, pool.spawned
+    assert_equal 1, exited.length
+  end
+
   def test_autotrim
     pool = mutex_pool(1, 2)
 
@@ -145,8 +221,7 @@ class TestThreadPool < Minitest::Test
     end
 
     start = Time.now
-    Thread.pass until pool.spawned == 1 ||
-      Time.now - start > 1
+    Thread.pass until pool.spawned == 1 || Time.now - start > 1
 
     assert_equal 1, pool.spawned
   end
@@ -160,7 +235,7 @@ class TestThreadPool < Minitest::Test
       Thread.current[:foo] = :hai
     }
 
-    pool.clean_thread_locals = true
+    pool.instance_variable_set :@clean_thread_locals, true
 
     pool << [1] * n
 
@@ -211,8 +286,7 @@ class TestThreadPool < Minitest::Test
     pool << 2
 
     start = Time.now
-    Thread.pass until pool.spawned == 0 ||
-      Time.now - start > 1
+    Thread.pass until pool.spawned == 0 || Time.now - start > 1
 
     assert_equal 0, pool.spawned
   end

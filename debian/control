@@ -2,27 +2,29 @@ Source: puma
 Section: web
 Priority: optional
 Maintainer: Debian Ruby Team <pkg-ruby-extras-maintainers@lists.alioth.debian.org>
-Uploaders: Pirate Praveen <praveen@debian.org>
+Uploaders: Pirate Praveen <praveen@debian.org>,
+           Lucas Kanashiro <kanashiro@debian.org>
 Build-Depends: curl,
                debhelper-compat (= 13),
                gem2deb (>= 1.6),
                libssl-dev,
                rake,
                ruby-localhost,
+               ruby-minitest-stub-const,
                ruby-nio4r (>= 2),
                ruby-rack (<< 3),
-               ruby-minitest-stub-const
-Standards-Version: 4.6.0
+               ruby-sd-notify,
+               procps
+Standards-Version: 4.6.2
 Vcs-Git: https://salsa.debian.org/ruby-team/puma.git -b debian/experimental
 Vcs-Browser: https://salsa.debian.org/ruby-team/puma
 Homepage: https://puma.io
 Testsuite: autopkgtest-pkg-ruby
-XS-Ruby-Versions: all
 Rules-Requires-Root: binary-targets
 
 Package: puma
 Architecture: any
-XB-Ruby-Versions: ${ruby:Versions}
+Breaks: rails (<< 2:6.1.7.3+dfsg-3~)
 Depends: ruby, ${misc:Depends}, ${ruby:Depends}, ${shlibs:Depends}
 Description: threaded HTTP 1.1 server for Ruby/Rack applications
  Puma is a simple, fast, threaded, and highly concurrent HTTP 1.1 server for

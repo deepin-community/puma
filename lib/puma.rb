@@ -3,30 +3,33 @@
 # Standard libraries
 require 'socket'
 require 'tempfile'
-require 'time'
-require 'etc'
 require 'uri'
 require 'stringio'
 
 require 'thread'
 
+# use require, see https://github.com/puma/puma/pull/2381
 require 'puma/puma_http11'
-require 'puma/detect'
-require 'puma/json_serialization'
+
+require_relative 'puma/detect'
+require_relative 'puma/json_serialization'
 
 module Puma
-  autoload :Const, 'puma/const'
-  autoload :Server, 'puma/server'
-  autoload :Launcher, 'puma/launcher'
+  # when Puma is loaded via `Puma::CLI`, all files are loaded via
+  # `require_relative`.  The below are for non-standard loading
+  autoload :Const,     "#{__dir__}/puma/const"
+  autoload :Server,    "#{__dir__}/puma/server"
+  autoload :Launcher,  "#{__dir__}/puma/launcher"
+  autoload :LogWriter, "#{__dir__}/puma/log_writer"
 
   # at present, MiniSSL::Engine is only defined in extension code (puma_http11),
   # not in minissl.rb
   HAS_SSL = const_defined?(:MiniSSL, false) && MiniSSL.const_defined?(:Engine, false)
 
-  HAS_UNIX_SOCKET = Object.const_defined? :UNIXSocket
+  HAS_UNIX_SOCKET = Object.const_defined?(:UNIXSocket) && !IS_WINDOWS
 
   if HAS_SSL
-    require 'puma/minissl'
+    require_relative 'puma/minissl'
   else
     module MiniSSL
       # this class is defined so that it exists when Puma is compiled
@@ -69,9 +72,7 @@ module Puma
     @get_stats.stats
   end
 
-  # Thread name is new in Ruby 2.3
   def self.set_thread_name(name)
-    return unless Thread.current.respond_to?(:name=)
     Thread.current.name = "puma #{name}"
   end
 end

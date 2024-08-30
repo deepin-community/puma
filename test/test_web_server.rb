@@ -23,7 +23,7 @@ class WebServerTest < Minitest::Test
 
   def setup
     @tester = TestHandler.new
-    @server = Puma::Server.new @tester, Puma::Events.strings
+    @server = Puma::Server.new @tester, nil, {log_writer: Puma::LogWriter.strings}
     @port = (@server.add_tcp_listener "127.0.0.1", 0).addr[1]
     @tcp = "http://127.0.0.1:#{@port}"
     @server.run
@@ -64,6 +64,12 @@ class WebServerTest < Minitest::Test
     socket.close
   end
 
+  def test_bad_path
+    socket = do_test("GET : HTTP/1.1\r\n\r\n", 3)
+    assert_match "HTTP/1.1 400 Bad Request\r\n\r\n", socket.read
+    socket.close
+  end
+
   def test_header_is_too_long
     long = "GET /test HTTP/1.1\r\n" + ("X-Big: stuff\r\n" * 15000) + "\r\n"
     assert_raises Errno::ECONNRESET, Errno::EPIPE, Errno::ECONNABORTED, Errno::EINVAL, IOError do
@@ -76,6 +82,20 @@ class WebServerTest < Minitest::Test
     long = "GET /test HTTP/1.1\r\nContent-length: #{body.length}\r\nConnection: close\r\n\r\n" + body
     socket = do_test(long, (Puma::Const::CHUNK_SIZE * 2) - 400)
     assert_match "hello", socket.read
+    socket.close
+  end
+
+  def test_supported_http_method
+    socket = do_test("PATCH www.zedshaw.com:443 HTTP/1.1\r\nConnection: close\r\n\r\n", 100)
+    response = socket.read
+    assert_match "hello", response
+    socket.close
+  end
+
+  def test_nonexistent_http_method
+    socket = do_test("FOOBARBAZ www.zedshaw.com:443 HTTP/1.1\r\nConnection: close\r\n\r\n", 100)
+    response = socket.read
+    assert_match "Not Implemented", response
     socket.close
   end
 

@@ -1,2 +1,4 @@
 # this is one of several sub-directories; no need to rename it
-repeated-path-segment puma usr/share/doc/puma/examples/puma/
+repeated-path-segment puma [usr/share/doc/puma/examples/puma/]
+repeated-path-segment 3.1.0 [usr/lib/x86_64-linux-gnu/rubygems-integration/3.1.0/extensions/x86_64-linux/3.1.0/]
+repeated-path-segment lib [usr/lib/x86_64-linux-gnu/rubygems-integration/3.1.0/gems/puma-5.6.7/lib/]

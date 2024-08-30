@@ -1,22 +1,28 @@
 # frozen_string_literal: true
 
-require 'puma/server'
-require 'puma/const'
+require_relative 'server'
+require_relative 'const'
 
 module Puma
   # Generic class that is used by `Puma::Cluster` and `Puma::Single` to
   # serve requests. This class spawns a new instance of `Puma::Server` via
   # a call to `start_server`.
   class Runner
-    def initialize(cli, events)
-      @launcher = cli
-      @events = events
-      @options = cli.options
+    def initialize(launcher)
+      @launcher = launcher
+      @log_writer = launcher.log_writer
+      @events = launcher.events
+      @config = launcher.config
+      @options = launcher.options
       @app = nil
       @control = nil
       @started_at = Time.now
       @wakeup = nil
     end
+
+    # Returns the hash of configuration options.
+    # @return [Puma::UserFileDefaultOptions]
+    attr_reader :options
 
     def wakeup!
       return unless @wakeup
@@ -36,27 +42,27 @@ module Puma
     end
 
     def log(str)
-      @events.log str
+      @log_writer.log str
     end
 
     # @version 5.0.0
     def stop_control
-      @control.stop(true) if @control
+      @control&.stop true
     end
 
     def error(str)
-      @events.error str
+      @log_writer.error str
     end
 
     def debug(str)
-      @events.log "- #{str}" if @options[:debug]
+      @log_writer.log "- #{str}" if @options[:debug]
     end
 
     def start_control
       str = @options[:control_url]
       return unless str
 
-      require 'puma/app/status'
+      require_relative 'app/status'
 
       if token = @options[:control_auth_token]
         token = nil if token.empty? || token == 'none'
@@ -64,12 +70,18 @@ module Puma
 
       app = Puma::App::Status.new @launcher, token
 
-      control = Puma::Server.new app, @launcher.events,
-        { min_threads: 0, max_threads: 1, queue_requests: false }
+      # A Reactor is not created and nio4r is not loaded when 'queue_requests: false'
+      # Use `nil` for events, no hooks in control server
+      control = Puma::Server.new app, nil,
+        { min_threads: 0, max_threads: 1, queue_requests: false, log_writer: @log_writer }
 
-      control.binder.parse [str], self, 'Starting control server'
+      begin
+        control.binder.parse [str], nil, 'Starting control server'
+      rescue Errno::EADDRINUSE, Errno::EACCES => e
+        raise e, "Error: Control server address '#{str}' is already in use. Original error: #{e.message}"
+      end
 
-      control.run thread_name: 'control'
+      control.run thread_name: 'ctl'
       @control = control
     end
 
@@ -94,12 +106,13 @@ module Puma
     def output_header(mode)
       min_t = @options[:min_threads]
       max_t = @options[:max_threads]
+      environment = @options[:environment]
 
       log "Puma starting in #{mode} mode..."
       log "* Puma version: #{Puma::Const::PUMA_VERSION} (#{ruby_engine}) (\"#{Puma::Const::CODE_NAME}\")"
       log "*  Min threads: #{min_t}"
       log "*  Max threads: #{max_t}"
-      log "*  Environment: #{ENV['RACK_ENV']}"
+      log "*  Environment: #{environment}"
 
       if mode == "cluster"
         log "*   Master PID: #{Process.pid}"
@@ -140,29 +153,29 @@ module Puma
     end
 
     def load_and_bind
-      unless @launcher.config.app_configured?
+      unless @config.app_configured?
         error "No application configured, nothing to run"
         exit 1
       end
 
       begin
-        @app = @launcher.config.app
+        @app = @config.app
       rescue Exception => e
         log "! Unable to load application: #{e.class}: #{e.message}"
         raise e
       end
 
-      @launcher.binder.parse @options[:binds], self
+      @launcher.binder.parse @options[:binds]
     end
 
     # @!attribute [r] app
     def app
-      @app ||= @launcher.config.app
+      @app ||= @config.app
     end
 
     def start_server
-      server = Puma::Server.new app, @launcher.events, @options
-      server.inherit_binder @launcher.binder
+      server = Puma::Server.new(app, @events, @options)
+      server.inherit_binder(@launcher.binder)
       server
     end
 
@@ -171,6 +184,30 @@ module Puma
       unless Dir.exist?(File.dirname(path))
         raise "Cannot redirect #{io_name} to #{path}"
       end
+    end
+
+    def utc_iso8601(val)
+      "#{val.utc.strftime '%FT%T'}Z"
+    end
+
+    def stats
+      {
+        versions: {
+          puma: Puma::Const::PUMA_VERSION,
+          ruby: {
+            engine: RUBY_ENGINE,
+            version: RUBY_VERSION,
+            patchlevel: RUBY_PATCHLEVEL
+          }
+        }
+      }
+    end
+
+    # this method call should always be guarded by `@log_writer.debug?`
+    def debug_loaded_extensions(str)
+      @log_writer.debug "────────────────────────────────── #{str}"
+      re_ext = /\.#{RbConfig::CONFIG['DLEXT']}\z/i
+      $LOADED_FEATURES.grep(re_ext).each { |f| @log_writer.debug("    #{f}") }
     end
   end
 end

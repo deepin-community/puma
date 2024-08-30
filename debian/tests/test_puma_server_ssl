@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -x
+
+# override default config
+# https://github.com/puma/puma/issues/2147
+OPENSSL_CONF=''
+export OPENSSL_CONF
+
+mv lib .gem2deb.lib
+
+RUBYLIB=. ruby2.5 -S rake -f ./debian/tests/test_puma_server_ssl.rake
+RUBYLIB=. ruby2.7 -S rake -f ./debian/tests/test_puma_server_ssl.rake
+
+mv .gem2deb.lib lib
+
+unset OPENSSL_CONF
+
+set +x

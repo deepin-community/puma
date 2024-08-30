@@ -2,6 +2,8 @@
 
 require 'thread'
 
+require_relative 'io_buffer'
+
 module Puma
   # Internal Docs for A simple thread pool management object.
   #
@@ -29,7 +31,7 @@ module Puma
     # The block passed is the work that will be performed in each
     # thread.
     #
-    def initialize(name, min, max, *extra, &block)
+    def initialize(name, options = {}, &block)
       @not_empty = ConditionVariable.new
       @not_full = ConditionVariable.new
       @mutex = Mutex.new
@@ -40,10 +42,19 @@ module Puma
       @waiting = 0
 
       @name = name
-      @min = Integer(min)
-      @max = Integer(max)
+      @min = Integer(options[:min_threads])
+      @max = Integer(options[:max_threads])
+      # Not an 'exposed' option, options[:pool_shutdown_grace_time] is used in CI
+      # to shorten @shutdown_grace_time from SHUTDOWN_GRACE_TIME. Parallel CI
+      # makes stubbing constants difficult.
+      @shutdown_grace_time = Float(options[:pool_shutdown_grace_time] || SHUTDOWN_GRACE_TIME)
       @block = block
-      @extra = extra
+      @out_of_band = options[:out_of_band]
+      @clean_thread_locals = options[:clean_thread_locals]
+      @before_thread_start = options[:before_thread_start]
+      @before_thread_exit = options[:before_thread_exit]
+      @reaping_time = options[:reaping_time]
+      @auto_trim_time = options[:auto_trim_time]
 
       @shutdown = false
 
@@ -62,17 +73,14 @@ module Puma
         end
       end
 
-      @clean_thread_locals = false
       @force_shutdown = false
       @shutdown_mutex = Mutex.new
     end
 
     attr_reader :spawned, :trim_requested, :waiting
-    attr_accessor :clean_thread_locals
-    attr_accessor :out_of_band_hook # @version 5.0.0
 
     def self.clean_thread_locals
-      Thread.current.keys.each do |key| # rubocop: disable Performance/HashEachMethods
+      Thread.current.keys.each do |key| # rubocop: disable Style/HashEachMethods
         Thread.current[key] = nil unless key == :__recursive_key__
       end
     end
@@ -101,15 +109,14 @@ module Puma
     def spawn_thread
       @spawned += 1
 
+      trigger_before_thread_start_hooks
       th = Thread.new(@spawned) do |spawned|
-        Puma.set_thread_name '%s threadpool %03i' % [@name, spawned]
+        Puma.set_thread_name '%s tp %03i' % [@name, spawned]
         todo  = @todo
         block = @block
         mutex = @mutex
         not_empty = @not_empty
         not_full = @not_full
-
-        extra = @extra.map { |i| i.new }
 
         while true
           work = nil
@@ -121,6 +128,7 @@ module Puma
                 @spawned -= 1
                 @workers.delete th
                 not_full.signal
+                trigger_before_thread_exit_hooks
                 Thread.exit
               end
 
@@ -144,7 +152,7 @@ module Puma
           end
 
           begin
-            @out_of_band_pending = true if block.call(work, *extra)
+            @out_of_band_pending = true if block.call(work)
           rescue Exception => e
             STDERR.puts "Error reached top of thread-pool: #{e.message} (#{e.class})"
           end
@@ -158,14 +166,44 @@ module Puma
 
     private :spawn_thread
 
+    def trigger_before_thread_start_hooks
+      return unless @before_thread_start&.any?
+
+      @before_thread_start.each do |b|
+        begin
+          b.call
+        rescue Exception => e
+          STDERR.puts "WARNING before_thread_start hook failed with exception (#{e.class}) #{e.message}"
+        end
+      end
+      nil
+    end
+
+    private :trigger_before_thread_start_hooks
+
+    def trigger_before_thread_exit_hooks
+      return unless @before_thread_exit&.any?
+
+      @before_thread_exit.each do |b|
+        begin
+          b.call
+        rescue Exception => e
+          STDERR.puts "WARNING before_thread_exit hook failed with exception (#{e.class}) #{e.message}"
+        end
+      end
+      nil
+    end
+
+    private :trigger_before_thread_exit_hooks
+
     # @version 5.0.0
     def trigger_out_of_band_hook
-      return false unless out_of_band_hook && out_of_band_hook.any?
+      return false unless @out_of_band&.any?
 
       # we execute on idle hook when all threads are free
       return false unless @spawned == @waiting
 
-      out_of_band_hook.each(&:call)
+      @out_of_band.each(&:call)
       true
     rescue Exception => e
       STDERR.puts "Exception calling out_of_band_hook: #{e.message} (#{e.class})"
@@ -319,12 +357,12 @@ module Puma
       end
     end
 
-    def auto_trim!(timeout=30)
+    def auto_trim!(timeout=@auto_trim_time)
       @auto_trim = Automaton.new(self, timeout, "#{@name} threadpool trimmer", :trim)
       @auto_trim.start!
     end
 
-    def auto_reap!(timeout=5)
+    def auto_reap!(timeout=@reaping_time)
       @reaper = Automaton.new(self, timeout, "#{@name} threadpool reaper", :reap)
       @reaper.start!
     end
@@ -344,8 +382,8 @@ module Puma
 
     # Tell all threads in the pool to exit and wait for them to finish.
     # Wait +timeout+ seconds then raise +ForceShutdown+ in remaining threads.
-    # Next, wait an extra +grace+ seconds then force-kill remaining threads.
-    # Finally, wait +kill_grace+ seconds for remaining threads to exit.
+    # Next, wait an extra +@shutdown_grace_time+ seconds then force-kill remaining
+    # threads. Finally, wait 1 second for remaining threads to exit.
     #
     def shutdown(timeout=-1)
       threads = with_mutex do
@@ -354,8 +392,8 @@ module Puma
         @not_empty.broadcast
         @not_full.broadcast
 
-        @auto_trim.stop if @auto_trim
-        @reaper.stop if @reaper
+        @auto_trim&.stop
+        @reaper&.stop
         # dup workers so that we join them all safely
         @workers.dup
       end
@@ -382,7 +420,7 @@ module Puma
             t.raise ForceShutdown if t[:with_force_shutdown]
           end
         end
-        join.call(SHUTDOWN_GRACE_TIME)
+        join.call(@shutdown_grace_time)
 
         # If threads are _still_ running, forcefully kill them and wait to finish.
         threads.each(&:kill)

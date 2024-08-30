@@ -1,5 +1,5 @@
 # frozen_string_literal: true
-require 'puma/json_serialization'
+require_relative '../json_serialization'
 
 module Puma
   module App
@@ -39,6 +39,9 @@ module Puma
           when 'phased-restart'
             @launcher.phased_restart ? 200 : 404
 
+          when 'refork'
+            @launcher.refork ? 200 : 404
+
           when 'reload-worker-directory'
             @launcher.send(:reload_worker_directory) ? 200 : 404
 
@@ -77,13 +80,13 @@ module Puma
 
       def authenticate(env)
         return true unless @auth_token
-        env['QUERY_STRING'].to_s.split(/&;/).include?("token=#{@auth_token}")
+        env['QUERY_STRING'].to_s.split('&;').include? "token=#{@auth_token}"
       end
 
       def rack_response(status, body, content_type='application/json')
         headers = {
-          'Content-Type' => content_type,
-          'Content-Length' => body.bytesize.to_s
+          'content-type' => content_type,
+          'content-length' => body.bytesize.to_s
         }
 
         [status, headers, [body]]

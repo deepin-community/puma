@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-require 'puma/runner'
-require 'puma/detect'
-require 'puma/plugin'
+require_relative 'runner'
+require_relative 'detect'
+require_relative 'plugin'
 
 module Puma
   # This class is instantiated by the `Puma::Launcher` and used
@@ -16,26 +16,26 @@ module Puma
     # @!attribute [r] stats
     def stats
       {
-        started_at: @started_at.utc.iso8601
-      }.merge(@server.stats)
+        started_at: utc_iso8601(@started_at)
+      }.merge(@server.stats).merge(super)
     end
 
     def restart
-      @server.begin_restart
+      @server&.begin_restart
     end
 
     def stop
-      @server.stop(false) if @server
+      @server&.stop false
     end
 
     def halt
-      @server.halt
+      @server&.halt
     end
 
     def stop_blocked
       log "- Gracefully stopping, waiting for requests to finish"
-      @control.stop(true) if @control
-      @server.stop(true) if @server
+      @control&.stop true
+      @server&.stop true
     end
 
     def run
@@ -55,7 +55,9 @@ module Puma
       log "Use Ctrl-C to stop"
       redirect_io
 
-      @launcher.events.fire_on_booted!
+      @events.fire_on_booted!
+
+      debug_loaded_extensions("Loaded Extensions:") if @log_writer.debug?
 
       begin
         server_thread.join

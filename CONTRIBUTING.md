@@ -25,14 +25,20 @@ Newbies welcome! We would be happy to help you make your first contribution to a
 
 ## Setup
 
-First step: join us on Matrix at [#puma-contrib:matrix.org](https://matrix.to/#/!blREBEDhVeXTYdjTVT:matrix.org?via=matrix.org)
+Any questions about contributing may be asked in our [Discussions](https://github.com/puma/puma/discussions).
 
-**If you're nervous, get stuck, need help, or want to know where to start and where you can help**, please don't hesitate to [book 30 minutes with maintainer @nateberkopec here](https://calendly.com/nate-berkopec/puma). He is happy to help!
+**If you're nervous, get stuck, need help, or want to know where to start and where you can help**, please don't hesitate to [book 30 minutes with maintainer @nateberkopec here](https://calendly.com/nateberkopec/30min). He is happy to help!
+
+Nate also [gave a 40 minute conference talk in 2022](https://www.youtube.com/watch?v=w4X_oBuPmTM) detailing how Puma works, a brief overview of its internals, and a quick guide on how to contribute.
+
+#### Clone the repo 
 
 Clone the Puma repository:
 ```sh
 git clone git@github.com:puma/puma.git && cd puma
 ```
+
+#### Ragel
 
 You need to install [ragel] (use Ragel version 7.0.0.9) to generate Puma's extension code.
 
@@ -52,12 +58,16 @@ Windows (Ruby 2.5 and later):
 ridk exec pacman -S mingw-w64-x86_64-openssl mingw-w64-x86_64-ragel
 ```
 
+#### Install Ruby dependencies
+
 Install the Ruby dependencies:
 ```sh
 bundle install
 ```
 
-To run Puma locally, you must compile the native extension.
+#### Compile the native extensions
+
+To run Puma locally, you must compile the native extension. Running the `test` rake task does this automatically, but you may need to manually run the compile command if you want to run Puma and haven't run the tests yet:
 
 Ubuntu, macOS, etc:
 ```sh
@@ -68,6 +78,8 @@ Windows:
 ```sh
 bundle exec rake -rdevkit compile
 ```
+
+#### Run your local Puma
 
 Now, you should be able to run Puma locally:
 
@@ -89,9 +101,15 @@ See the [Bundler docs](https://bundler.io/man/gemfile.5.html#PATH) for more deta
 
 ## Running tests
 
-To run the entire test suite:
+To run rubocop + tests:
+
 ```sh
-bundle exec rake test:all
+bundle exec rake 
+```
+
+To run the test suite only:
+```sh
+bundle exec rake test
 ```
 
 To run a single test file:
@@ -109,11 +127,40 @@ To run a single test:
 bundle exec m test/test_binder.rb:37
 ```
 
+To run a single test with 5 seconds as the test case timeout:
+```sh
+TEST_CASE_TIMEOUT=5 bundle exec m test/test_binder.rb:37
+```
+
+If you would like more information about extension building, SSL versions, your local Ruby version, and more, use the PUMA_TEST_DEBUG env variable:
+
+```sh
+PUMA_TEST_DEBUG=1 bundle exec rake test
+```
+
+#### File limits
+
+Puma's test suite opens up a lot of sockets. This may exceed the default limit of your operating system. If your file limits are low, you may experience "too many open file" errors when running the Puma test suite.
+
+```
+# check your file limit
+ulimit -S -n
+
+# change file limit for the current session
+ulimit -S -n <value>
+```
+
+We find that values of 4000 or more work well. [Learn more about your file limits and how to change them here.](https://wilsonmar.github.io/maximum-limits/)
+
 ## How to contribute
 
 Puma could use your help in several areas!
 
-**The [contrib-wanted] label indicates that an issue might approachable to first-time contributors.**\
+**Don't worry about "claiming an issue". No issues are "claimed" in Puma.** Just start working on it. The issue tracker is almost always kept updated, so if there is an open issue, it is ready for you to contribute (unless you have questions about how to close issue - then please ask!). Once you have a few lines of code, post a draft PR. We are more than happy to help once you have a draft PR up.
+
+**New to systems programming? That's ok!** Puma deals with concepts you may not have been familiar with before, like sockets, TCP, UDP, SSL, and Threads. That's ok! You can learn by contributing. Also, see the "Bibliography" section at the end of this document.
+
+**The [contrib-wanted] label indicates that an issue might approachable to first-time contributors.**
 
 **Reproducing bug reports**: The [needs-repro] label indicates than an issue lacks reproduction steps. You can help by reproducing the issue and sharing the steps you took in the comments.
 
@@ -153,7 +200,7 @@ bundle exec puma -C test/config/settings.rb test/rackup/hello.ru
 
 There is also a Dockerfile available for reproducing Linux-specific issues:
 ```sh
-docker build -f tools/docker/Dockerfile -t puma .
+docker build -f tools/Dockerfile -t puma .
 docker run -p 9292:9292 -it puma
 ```
 
@@ -161,6 +208,8 @@ docker run -p 9292:9292 -it puma
 [config]: https://github.com/puma/puma/blob/master/test/config/settings.rb
 
 ## Pull requests
+
+Please open draft PRs as soon as you are ready for feedback from the community.
 
 Code contributions should generally include test coverage. If you aren't sure how to
 test your changes, please open a pull request and leave a comment asking for
@@ -178,7 +227,7 @@ As a contributor, you may make pull requests against `-stable` branches to backp
 
 ## Join the community
 
-If you're looking to contribute to Puma, please join us on Matrix at [#puma-contrib:matrix.org](https://matrix.to/#/!blREBEDhVeXTYdjTVT:matrix.org?via=matrix.org).
+If you're looking to contribute to Puma, please join us in [Discussions](https://github.com/puma/puma/discussions).
 
 ## Bibliography/Reading
 
@@ -186,5 +235,6 @@ Puma can be a bit intimidating for your first contribution because there's a lot
 
 * [Puma's Architecture docs](https://github.com/puma/puma/blob/master/docs/architecture.md)
 * [The Rack specification](https://github.com/rack/rack/blob/master/SPEC.rdoc)
+* [Working with...](https://workingwithruby.com/) "Working With" is a excellent (and now free) Ruby book series about working with Threads, TCP and Unix Sockets.
 * The Ruby docs for IO.pipe, TCPServer/Socket.
 * [nio4r documentation](https://github.com/socketry/nio4r/wiki/Getting-Started)

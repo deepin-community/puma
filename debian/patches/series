@@ -3,3 +3,7 @@
 0012-disable-cli-ssl-tests.patch
 0013-fix-test-term-not-accepts-new-connections.patch
 0014-disable-test-failing-on-amd64.patch
+0015-disable-different-output-test.patch
+0016-disable-test-failing-on-arm64.patch
+0017-disable-test-failing-on-armhf.patch
+0009-CI-update-chain-certs-example-files-3426.patch

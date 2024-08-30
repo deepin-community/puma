@@ -8,9 +8,9 @@ class IO
   end
 end
 
-require 'puma/detect'
+require_relative 'detect'
+require_relative 'io_buffer'
 require 'tempfile'
-require 'forwardable'
 
 if Puma::IS_JRUBY
   # We have to work around some OpenSSL buffer/io-readiness bugs
@@ -22,6 +22,11 @@ end
 module Puma
 
   class ConnectionError < RuntimeError; end
+
+  class HttpParserError501 < IOError; end
+
+  #———————————————————————— DO NOT USE — this class is for internal use only ———
+
 
   # An instance of this class represents a unique request from a client.
   # For example, this could be a web request from a browser or from CURL.
@@ -35,23 +40,42 @@ module Puma
   # Instances of this class are responsible for knowing if
   # the header and body are fully buffered via the `try_to_finish` method.
   # They can be used to "time out" a response via the `timeout_at` reader.
-  class Client
+  #
+  class Client # :nodoc:
+
+    # this tests all values but the last, which must be chunked
+    ALLOWED_TRANSFER_ENCODING = %w[compress deflate gzip].freeze
+
+    # chunked body validation
+    CHUNK_SIZE_INVALID = /[^\h]/.freeze
+    CHUNK_VALID_ENDING = Const::LINE_END
+    CHUNK_VALID_ENDING_SIZE = CHUNK_VALID_ENDING.bytesize
+
+    # The maximum number of bytes we'll buffer looking for a valid
+    # chunk header.
+    MAX_CHUNK_HEADER_SIZE = 4096
+
+    # The maximum amount of excess data the client sends
+    # using chunk size extensions before we abort the connection.
+    MAX_CHUNK_EXCESS = 16 * 1024
+
+    # Content-Length header value validation
+    CONTENT_LENGTH_VALUE_INVALID = /[^\d]/.freeze
+
+    TE_ERR_MSG = 'Invalid Transfer-Encoding'
+
     # The object used for a request with no body. All requests with
     # no body share this one object since it has no state.
     EmptyBody = NullIO.new
 
     include Puma::Const
-    extend Forwardable
 
     def initialize(io, env=nil)
       @io = io
       @to_io = io.to_io
+      @io_buffer = IOBuffer.new
       @proto_env = env
-      if !env
-        @env = nil
-      else
-        @env = env.dup
-      end
+      @env = env&.dup
 
       @parser = HttpParser.new
       @parsed_bytes = 0
@@ -69,7 +93,11 @@ module Puma
       @requests_served = 0
       @hijacked = false
 
+      @http_content_length_limit = nil
+      @http_content_length_limit_exceeded = false
+
       @peerip = nil
+      @peer_family = nil
       @listener = nil
       @remote_addr_header = nil
       @expect_proxy_proto = false
@@ -77,16 +105,22 @@ module Puma
       @body_remain = 0
 
       @in_last_chunk = false
+
+      # need unfrozen ASCII-8BIT, +'' is UTF-8
+      @read_buffer = String.new # rubocop: disable Performance/UnfreezeString
     end
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
-                :tempfile
+                :tempfile, :io_buffer, :http_content_length_limit_exceeded
 
-    attr_writer :peerip
+    attr_writer :peerip, :http_content_length_limit
 
     attr_accessor :remote_addr_header, :listener
 
-    def_delegators :@io, :closed?
+    # Remove in Puma 7?
+    def closed?
+      @to_io.closed?
+    end
 
     # Test to see if io meets a bare minimum of functioning, @to_io needs to be
     # used for MiniSSL::Socket
@@ -122,6 +156,7 @@ module Puma
 
     def reset(fast_check=true)
       @parser.reset
+      @io_buffer.reset
       @read_header = true
       @read_proxy = !!@expect_proxy_proto
       @env = @proto_env.dup
@@ -132,6 +167,7 @@ module Puma
       @body_remain = 0
       @peerip = nil if @remote_addr_header
       @in_last_chunk = false
+      @http_content_length_limit_exceeded = false
 
       if @buffer
         return false unless try_to_parse_proxy_protocol
@@ -161,7 +197,7 @@ module Puma
     def close
       begin
         @io.close
-      rescue IOError
+      rescue IOError, Errno::EBADF
         Puma::Util.purge_interrupt_queue
       end
     end
@@ -191,6 +227,17 @@ module Puma
     end
 
     def try_to_finish
+      if env[CONTENT_LENGTH] && above_http_content_limit(env[CONTENT_LENGTH].to_i)
+        @http_content_length_limit_exceeded = true
+      end
+
+      if @http_content_length_limit_exceeded
+        @buffer = nil
+        @body = EmptyBody
+        set_ready
+        return true
+      end
+
       return read_body if in_data_phase
 
       begin
@@ -219,6 +266,10 @@ module Puma
       return false unless try_to_parse_proxy_protocol
 
       @parsed_bytes = @parser.execute(@env, @buffer, @parsed_bytes)
+
+      if @parser.finished? && above_http_content_limit(@parser.body.bytesize)
+        @http_content_length_limit_exceeded = true
+      end
 
       if @parser.finished?
         return setup_body
@@ -257,12 +308,22 @@ module Puma
       return @peerip if @peerip
 
       if @remote_addr_header
-        hdr = (@env[@remote_addr_header] || LOCALHOST_IP).split(/[\s,]/).first
+        hdr = (@env[@remote_addr_header] || @io.peeraddr.last).split(/[\s,]/).first
         @peerip = hdr
         return hdr
       end
 
       @peerip ||= @io.peeraddr.last
+    end
+
+    def peer_family
+      return @peer_family if @peer_family
+
+      @peer_family ||= begin
+                         @io.local_address.afamily
+                       rescue
+                         Socket::AF_INET
+                       end
     end
 
     # Returns true if the persistent connection can be closed immediately
@@ -288,7 +349,7 @@ module Puma
     private
 
     def setup_body
-      @body_read_start = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond)
+      @body_read_start = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
 
       if @env[HTTP_EXPECT] == CONTINUE
         # TODO allow a hook here to check the headers before
@@ -302,16 +363,27 @@ module Puma
       body = @parser.body
 
       te = @env[TRANSFER_ENCODING2]
-
       if te
-        if te.include?(",")
-          te.split(",").each do |part|
-            if CHUNKED.casecmp(part.strip) == 0
-              return setup_chunked_body(body)
-            end
+        te_lwr = te.downcase
+        if te.include? ','
+          te_ary = te_lwr.split ','
+          te_count = te_ary.count CHUNKED
+          te_valid = te_ary[0..-2].all? { |e| ALLOWED_TRANSFER_ENCODING.include? e }
+          if te_ary.last == CHUNKED && te_count == 1 && te_valid
+            @env.delete TRANSFER_ENCODING2
+            return setup_chunked_body body
+          elsif te_count >= 1
+            raise HttpParserError   , "#{TE_ERR_MSG}, multiple chunked: '#{te}'"
+          elsif !te_valid
+            raise HttpParserError501, "#{TE_ERR_MSG}, unknown value: '#{te}'"
           end
-        elsif CHUNKED.casecmp(te) == 0
-          return setup_chunked_body(body)
+        elsif te_lwr == CHUNKED
+          @env.delete TRANSFER_ENCODING2
+          return setup_chunked_body body
+        elsif ALLOWED_TRANSFER_ENCODING.include? te_lwr
+          raise HttpParserError     , "#{TE_ERR_MSG}, single value must be chunked: '#{te}'"
+        else
+          raise HttpParserError501  , "#{TE_ERR_MSG}, unknown value: '#{te}'"
         end
       end
 
@@ -319,7 +391,12 @@ module Puma
 
       cl = @env[CONTENT_LENGTH]
 
-      unless cl
+      if cl
+        # cannot contain characters that are not \d, or be empty
+        if CONTENT_LENGTH_VALUE_INVALID.match?(cl) || cl.empty?
+          raise HttpParserError, "Invalid Content-Length: #{cl.inspect}"
+        end
+      else
         @buffer = body.empty? ? nil : body
         @body = EmptyBody
         set_ready
@@ -369,7 +446,7 @@ module Puma
       end
 
       begin
-        chunk = @io.read_nonblock(want)
+        chunk = @io.read_nonblock(want, @read_buffer)
       rescue IO::WaitReadable
         return false
       rescue SystemCallError, IOError
@@ -401,7 +478,7 @@ module Puma
     def read_chunked_body
       while true
         begin
-          chunk = @io.read_nonblock(4096)
+          chunk = @io.read_nonblock(4096, @read_buffer)
         rescue IO::WaitReadable
           return false
         rescue SystemCallError, IOError
@@ -427,6 +504,7 @@ module Puma
       @chunked_body = true
       @partial_part_left = 0
       @prev_chunk = ""
+      @excess_cr = 0
 
       @body = Tempfile.new(Const::PUMA_TMP_BASE)
       @body.unlink
@@ -477,23 +555,49 @@ module Puma
 
       while !io.eof?
         line = io.gets
-        if line.end_with?("\r\n")
-          len = line.strip.to_i(16)
+        if line.end_with?(CHUNK_VALID_ENDING)
+          # Puma doesn't process chunk extensions, but should parse if they're
+          # present, which is the reason for the semicolon regex
+          chunk_hex = line.strip[/\A[^;]+/]
+          if CHUNK_SIZE_INVALID.match? chunk_hex
+            raise HttpParserError, "Invalid chunk size: '#{chunk_hex}'"
+          end
+          len = chunk_hex.to_i(16)
           if len == 0
             @in_last_chunk = true
             @body.rewind
             rest = io.read
-            last_crlf_size = "\r\n".bytesize
-            if rest.bytesize < last_crlf_size
+            if rest.bytesize < CHUNK_VALID_ENDING_SIZE
               @buffer = nil
-              @partial_part_left = last_crlf_size - rest.bytesize
+              @partial_part_left = CHUNK_VALID_ENDING_SIZE - rest.bytesize
               return false
             else
-              @buffer = rest[last_crlf_size..-1]
+              # if the next character is a CRLF, set buffer to everything after that CRLF
+              start_of_rest = if rest.start_with?(CHUNK_VALID_ENDING)
+                CHUNK_VALID_ENDING_SIZE
+              else # we have started a trailer section, which we do not support. skip it!
+                rest.index(CHUNK_VALID_ENDING*2) + CHUNK_VALID_ENDING_SIZE*2
+              end
+
+              @buffer = rest[start_of_rest..-1]
               @buffer = nil if @buffer.empty?
               set_ready
               return true
             end
+          end
+
+          # Track the excess as a function of the size of the
+          # header vs the size of the actual data. Excess can
+          # go negative (and is expected to) when the body is
+          # significant.
+          # The additional of chunk_hex.size and 2 compensates
+          # for a client sending 1 byte in a chunked body over
+          # a long period of time, making sure that that client
+          # isn't accidentally eventually punished.
+          @excess_cr += (line.size - len - chunk_hex.size - 2)
+
+          if @excess_cr >= MAX_CHUNK_EXCESS
+            raise HttpParserError, "Maximum chunk excess detected"
           end
 
           len += 2
@@ -509,7 +613,12 @@ module Puma
 
           case
           when got == len
-            write_chunk(part[0..-3]) # to skip the ending \r\n
+            # proper chunked segment must end with "\r\n"
+            if part.end_with? CHUNK_VALID_ENDING
+              write_chunk(part[0..-3]) # to skip the ending \r\n
+            else
+              raise HttpParserError, "Chunk size mismatch"
+            end
           when got <= len - 2
             write_chunk(part)
             @partial_part_left = len - part.size
@@ -518,6 +627,10 @@ module Puma
             @partial_part_left = len - part.size
           end
         else
+          if @prev_chunk.size + chunk.size >= MAX_CHUNK_HEADER_SIZE
+            raise HttpParserError, "maximum size of chunk header exceeded"
+          end
+
           @prev_chunk = line
           return false
         end
@@ -533,10 +646,14 @@ module Puma
 
     def set_ready
       if @body_read_start
-        @env['puma.request_body_wait'] = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond) - @body_read_start
+        @env['puma.request_body_wait'] = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond) - @body_read_start
       end
       @requests_served += 1
       @ready = true
+    end
+
+    def above_http_content_limit(value)
+      @http_content_length_limit&.< value
     end
   end
 end

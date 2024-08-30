@@ -22,10 +22,11 @@ Gem::Specification.new do |s|
       "bug_tracker_uri" => "https://github.com/puma/puma/issues",
       "changelog_uri" => "https://github.com/puma/puma/blob/master/History.md",
       "homepage_uri" => "https://puma.io",
-      "source_code_uri" => "https://github.com/puma/puma"
+      "source_code_uri" => "https://github.com/puma/puma",
+      "rubygems_mfa_required" => "true"
     }
   end
 
   s.license = "BSD-3-Clause"
-  s.required_ruby_version = Gem::Requirement.new(">= 2.2")
+  s.required_ruby_version = Gem::Requirement.new(">= 2.4")
 end

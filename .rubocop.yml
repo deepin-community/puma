@@ -1,6 +1,9 @@
+require:
+  - rubocop-performance
+
 AllCops:
   DisabledByDefault: true
-  TargetRubyVersion: 2.2
+  TargetRubyVersion: 2.4
   DisplayCopNames: true
   StyleGuideCopsOnly: false
   Exclude:
@@ -9,6 +12,21 @@ AllCops:
     - 'examples/**/*'
     - 'pkg/**/*'
     - 'Rakefile'
+  SuggestExtensions: false
+  NewCops: enable
+
+# enable all Performance cops
+Performance:
+  Enabled: true
+
+# ————————————————————————————————————————— disabled cops
+
+# ————————————————————————————————————————— enabled cops
+Layout/AccessModifierIndentation:
+  EnforcedStyle: indent
+
+Layout/IndentationStyle:
+  Enabled: true
 
 Layout/SpaceAfterColon:
   Enabled: true
@@ -26,16 +44,19 @@ Layout/SpaceBeforeFirstArg:
 Layout/SpaceInsideParens:
   Enabled: true
 
-Layout/Tab:
-  Enabled: true
-
-Layout/TrailingBlankLines:
+Layout/TrailingEmptyLines:
   Enabled: true
 
 Layout/TrailingWhitespace:
   Enabled: true
 
 Lint/Debugger:
+  Enabled: true
+
+Metrics/ParameterLists:
+  Max: 7
+
+Naming/ConstantName:
   Enabled: true
 
 Naming/MethodName:
@@ -50,32 +71,14 @@ Naming/VariableName:
 Style/MethodDefParentheses:
   Enabled: true
 
-Style/TrailingCommaInArguments:
-  Enabled: true
-
-Performance:
-  Enabled: true
-
-Metrics/ParameterLists:
-  Max: 7
-
-Performance/RedundantMatch:
-  Enabled: true
-
-Performance/RedundantBlockCall:
-  Enabled: true
-
-Performance/StringReplacement:
-  Enabled: true
-
-Layout/AccessModifierIndentation:
-  EnforcedStyle: indent
-
-Style/WhileUntilModifier:
+Style/SafeNavigation:
   Enabled: true
 
 Style/TernaryParentheses:
   Enabled: true
 
-Style/RedundantReturn:
+Style/TrailingCommaInArguments:
+  Enabled: true
+
+Style/WhileUntilModifier:
   Enabled: true

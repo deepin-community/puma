@@ -1,11 +1,13 @@
 package org.jruby.puma;
 
 import org.jruby.Ruby;
+import org.jruby.RubyArray;
 import org.jruby.RubyClass;
 import org.jruby.RubyModule;
 import org.jruby.RubyObject;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.exceptions.RaiseException;
 import org.jruby.javasupport.JavaEmbedUtils;
 import org.jruby.runtime.Block;
 import org.jruby.runtime.ObjectAllocator;
@@ -14,6 +16,7 @@ import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.ByteList;
 
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -21,6 +24,7 @@ import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
+import javax.net.ssl.X509TrustManager;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.IOException;
@@ -31,15 +35,19 @@ import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.UnrecoverableKeyException;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static javax.net.ssl.SSLEngineResult.Status;
 import static javax.net.ssl.SSLEngineResult.HandshakeStatus;
 
-public class MiniSSL extends RubyObject {
+public class MiniSSL extends RubyObject { // MiniSSL::Engine
+  private static final long serialVersionUID = -6903439483039141234L;
   private static ObjectAllocator ALLOCATOR = new ObjectAllocator() {
     public IRubyObject allocate(Ruby runtime, RubyClass klass) {
       return new MiniSSL(runtime, klass);
@@ -50,11 +58,10 @@ public class MiniSSL extends RubyObject {
     RubyModule mPuma = runtime.defineModule("Puma");
     RubyModule ssl = mPuma.defineModuleUnder("MiniSSL");
 
-    mPuma.defineClassUnder("SSLError",
-                           runtime.getClass("IOError"),
-                           runtime.getClass("IOError").getAllocator());
+    // Puma::MiniSSL::SSLError
+    ssl.defineClassUnder("SSLError", runtime.getStandardError(), runtime.getStandardError().getAllocator());
 
-    RubyClass eng = ssl.defineClassUnder("Engine",runtime.getObject(),ALLOCATOR);
+    RubyClass eng = ssl.defineClassUnder("Engine", runtime.getObject(), ALLOCATOR);
     eng.defineAnnotatedMethods(MiniSSL.class);
   }
 
@@ -80,11 +87,11 @@ public class MiniSSL extends RubyObject {
     /**
      * Writes bytes to the buffer after ensuring there's room
      */
-    public void put(byte[] bytes) {
-      if (buffer.remaining() < bytes.length) {
-        resize(buffer.limit() + bytes.length);
+    private void put(byte[] bytes, final int offset, final int length) {
+      if (buffer.remaining() < length) {
+        resize(buffer.limit() + length);
       }
-      buffer.put(bytes);
+      buffer.put(bytes, offset, length);
     }
 
     /**
@@ -115,7 +122,7 @@ public class MiniSSL extends RubyObject {
 
       buffer.get(bss);
       buffer.clear();
-      return new ByteList(bss);
+      return new ByteList(bss, false);
     }
 
     @Override
@@ -136,76 +143,116 @@ public class MiniSSL extends RubyObject {
   private static Map<String, KeyManagerFactory> keyManagerFactoryMap = new ConcurrentHashMap<String, KeyManagerFactory>();
   private static Map<String, TrustManagerFactory> trustManagerFactoryMap = new ConcurrentHashMap<String, TrustManagerFactory>();
 
-  @JRubyMethod(meta = true)
+  @JRubyMethod(meta = true) // Engine.server
   public static synchronized IRubyObject server(ThreadContext context, IRubyObject recv, IRubyObject miniSSLContext)
       throws KeyStoreException, IOException, CertificateException, NoSuchAlgorithmException, UnrecoverableKeyException {
     // Create the KeyManagerFactory and TrustManagerFactory for this server
-    String keystoreFile = miniSSLContext.callMethod(context, "keystore").convertToString().asJavaString();
-    char[] password = miniSSLContext.callMethod(context, "keystore_pass").convertToString().asJavaString().toCharArray();
+    String keystoreFile = asStringValue(miniSSLContext.callMethod(context, "keystore"), null);
+    char[] keystorePass = asStringValue(miniSSLContext.callMethod(context, "keystore_pass"), null).toCharArray();
+    String keystoreType = asStringValue(miniSSLContext.callMethod(context, "keystore_type"), KeyStore::getDefaultType);
 
-    KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+    String truststoreFile;
+    char[] truststorePass;
+    String truststoreType;
+    IRubyObject truststore = miniSSLContext.callMethod(context, "truststore");
+    if (truststore.isNil()) {
+      truststoreFile = keystoreFile;
+      truststorePass = keystorePass;
+      truststoreType = keystoreType;
+    } else if (!isDefaultSymbol(context, truststore)) {
+      truststoreFile = truststore.convertToString().asJavaString();
+      IRubyObject pass = miniSSLContext.callMethod(context, "truststore_pass");
+      if (pass.isNil()) {
+        truststorePass = null;
+      } else {
+        truststorePass = asStringValue(pass, null).toCharArray();
+      }
+      truststoreType = asStringValue(miniSSLContext.callMethod(context, "truststore_type"), KeyStore::getDefaultType);
+    } else { // self.truststore = :default
+      truststoreFile = null;
+      truststorePass = null;
+      truststoreType = null;
+    }
+
+    KeyStore ks = KeyStore.getInstance(keystoreType);
     InputStream is = new FileInputStream(keystoreFile);
     try {
-      ks.load(is, password);
+      ks.load(is, keystorePass);
     } finally {
       is.close();
     }
     KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
-    kmf.init(ks, password);
+    kmf.init(ks, keystorePass);
     keyManagerFactoryMap.put(keystoreFile, kmf);
 
-    KeyStore ts = KeyStore.getInstance(KeyStore.getDefaultType());
-    is = new FileInputStream(keystoreFile);
-    try {
-      ts.load(is, password);
-    } finally {
-      is.close();
+    if (truststoreFile != null) {
+      KeyStore ts = KeyStore.getInstance(truststoreType);
+      is = new FileInputStream(truststoreFile);
+      try {
+        ts.load(is, truststorePass);
+      } finally {
+        is.close();
+      }
+      TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
+      tmf.init(ts);
+      trustManagerFactoryMap.put(truststoreFile, tmf);
     }
-    TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
-    tmf.init(ts);
-    trustManagerFactoryMap.put(keystoreFile, tmf);
 
     RubyClass klass = (RubyClass) recv;
-    return klass.newInstance(context,
-        new IRubyObject[] { miniSSLContext },
-        Block.NULL_BLOCK);
+    return klass.newInstance(context, miniSSLContext, Block.NULL_BLOCK);
+  }
+
+  private static String asStringValue(IRubyObject value, Supplier<String> defaultValue) {
+    if (defaultValue != null && value.isNil()) return defaultValue.get();
+    return value.convertToString().asJavaString();
+  }
+
+  private static boolean isDefaultSymbol(ThreadContext context, IRubyObject truststore) {
+    return context.runtime.newSymbol("default").equals(truststore);
   }
 
   @JRubyMethod
-  public IRubyObject initialize(ThreadContext threadContext, IRubyObject miniSSLContext)
+  public IRubyObject initialize(ThreadContext context, IRubyObject miniSSLContext)
       throws KeyStoreException, NoSuchAlgorithmException, KeyManagementException {
-    KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
-    KeyStore ts = KeyStore.getInstance(KeyStore.getDefaultType());
 
-    String keystoreFile = miniSSLContext.callMethod(threadContext, "keystore").convertToString().asJavaString();
+    String keystoreFile = miniSSLContext.callMethod(context, "keystore").convertToString().asJavaString();
     KeyManagerFactory kmf = keyManagerFactoryMap.get(keystoreFile);
-    TrustManagerFactory tmf = trustManagerFactoryMap.get(keystoreFile);
-    if(kmf == null || tmf == null) {
-      throw new KeyStoreException("Could not find KeyManagerFactory/TrustManagerFactory for keystore: " + keystoreFile);
+    IRubyObject truststore = miniSSLContext.callMethod(context, "truststore");
+    String truststoreFile = isDefaultSymbol(context, truststore) ? "" : asStringValue(truststore, () -> keystoreFile);
+    TrustManagerFactory tmf = trustManagerFactoryMap.get(truststoreFile); // null if self.truststore = :default
+    if (kmf == null) {
+      throw new KeyStoreException("Could not find KeyManagerFactory for keystore: " + keystoreFile + " truststore: " + truststoreFile);
     }
 
     SSLContext sslCtx = SSLContext.getInstance("TLS");
 
-    sslCtx.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
+    sslCtx.init(kmf.getKeyManagers(), getTrustManagers(tmf), null);
     closed = false;
     handshake = false;
     engine = sslCtx.createSSLEngine();
 
-    String[] protocols;
-    if(miniSSLContext.callMethod(threadContext, "no_tlsv1").isTrue()) {
-        protocols = new String[] { "TLSv1.1", "TLSv1.2" };
+    String[] enabledProtocols;
+    IRubyObject protocols = miniSSLContext.callMethod(context, "protocols");
+    if (protocols.isNil()) {
+      if (miniSSLContext.callMethod(context, "no_tlsv1").isTrue()) {
+        enabledProtocols = new String[] { "TLSv1.1", "TLSv1.2", "TLSv1.3" };
+      } else {
+        enabledProtocols = new String[] { "TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3" };
+      }
+
+      if (miniSSLContext.callMethod(context, "no_tlsv1_1").isTrue()) {
+        enabledProtocols = new String[] { "TLSv1.2", "TLSv1.3" };
+      }
+    } else if (protocols instanceof RubyArray) {
+      enabledProtocols = (String[]) ((RubyArray) protocols).toArray(new String[0]);
     } else {
-        protocols = new String[] { "TLSv1", "TLSv1.1", "TLSv1.2" };
+      throw context.runtime.newTypeError(protocols, context.runtime.getArray());
     }
+    engine.setEnabledProtocols(enabledProtocols);
 
-    if(miniSSLContext.callMethod(threadContext, "no_tlsv1_1").isTrue()) {
-        protocols = new String[] { "TLSv1.2" };
-    }
-
-    engine.setEnabledProtocols(protocols);
     engine.setUseClientMode(false);
 
-    long verify_mode = miniSSLContext.callMethod(threadContext, "verify_mode").convertToInteger("to_i").getLongValue();
+    long verify_mode = miniSSLContext.callMethod(context, "verify_mode").convertToInteger("to_i").getLongValue();
     if ((verify_mode & 0x1) != 0) { // 'peer'
         engine.setWantClientAuth(true);
     }
@@ -213,10 +260,11 @@ public class MiniSSL extends RubyObject {
         engine.setNeedClientAuth(true);
     }
 
-    IRubyObject sslCipherListObject = miniSSLContext.callMethod(threadContext, "ssl_cipher_list");
-    if (!sslCipherListObject.isNil()) {
-      String[] sslCipherList = sslCipherListObject.convertToString().asJavaString().split(",");
-      engine.setEnabledCipherSuites(sslCipherList);
+    IRubyObject cipher_suites = miniSSLContext.callMethod(context, "cipher_suites");
+    if (cipher_suites instanceof RubyArray) {
+      engine.setEnabledCipherSuites((String[]) ((RubyArray) cipher_suites).toArray(new String[0]));
+    } else if (!cipher_suites.isNil()) {
+      throw context.runtime.newTypeError(cipher_suites, context.runtime.getArray());
     }
 
     SSLSession session = engine.getSession();
@@ -228,16 +276,53 @@ public class MiniSSL extends RubyObject {
     return this;
   }
 
+  private TrustManager[] getTrustManagers(TrustManagerFactory factory) {
+    if (factory == null) return null; // use JDK trust defaults
+    final TrustManager[] tms = factory.getTrustManagers();
+    if (tms != null) {
+      for (int i=0; i<tms.length; i++) {
+        final TrustManager tm = tms[i];
+        if (tm instanceof X509TrustManager) {
+          tms[i] = new TrustManagerWrapper((X509TrustManager) tm);
+        }
+      }
+    }
+    return tms;
+  }
+
+  private volatile transient X509Certificate lastCheckedCert0;
+
+  private class TrustManagerWrapper implements X509TrustManager {
+
+    private final X509TrustManager delegate;
+
+    TrustManagerWrapper(X509TrustManager delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+      lastCheckedCert0 = chain.length > 0 ? chain[0] : null;
+      delegate.checkClientTrusted(chain, authType);
+    }
+
+    @Override
+    public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+      delegate.checkServerTrusted(chain, authType);
+    }
+
+    @Override
+    public X509Certificate[] getAcceptedIssuers() {
+      return delegate.getAcceptedIssuers();
+    }
+
+  }
+
   @JRubyMethod
   public IRubyObject inject(IRubyObject arg) {
-    try {
-      byte[] bytes = arg.convertToString().getBytes();
-      inboundNetData.put(bytes);
-      return this;
-    } catch (Exception e) {
-      e.printStackTrace();
-      throw new RuntimeException(e);
-    }
+    ByteList bytes = arg.convertToString().getByteList();
+    inboundNetData.put(bytes.unsafeBytes(), bytes.getBegin(), bytes.getRealSize());
+    return this;
   }
 
   private enum SSLOperation {
@@ -257,7 +342,7 @@ public class MiniSSL extends RubyObject {
           res = engine.unwrap(src.getRawBuffer(), dst.getRawBuffer());
           break;
         default:
-          throw new IllegalStateException("Unknown SSLOperation: " + sslOp);
+          throw new AssertionError("Unknown SSLOperation: " + sslOp);
       }
 
       switch (res.getStatus()) {
@@ -285,19 +370,11 @@ public class MiniSSL extends RubyObject {
       }
     }
 
-    // after each op, run any delegated tasks if needed
-    if(res.getHandshakeStatus() == HandshakeStatus.NEED_TASK) {
-      Runnable runnable;
-      while ((runnable = engine.getDelegatedTask()) != null) {
-        runnable.run();
-      }
-    }
-
     return res;
   }
 
   @JRubyMethod
-  public IRubyObject read() throws Exception {
+  public IRubyObject read() {
     try {
       inboundNetData.flip();
 
@@ -310,11 +387,12 @@ public class MiniSSL extends RubyObject {
 
       HandshakeStatus handshakeStatus = engine.getHandshakeStatus();
       boolean done = false;
-      SSLEngineResult res = null;
       while (!done) {
+        SSLEngineResult res;
         switch (handshakeStatus) {
           case NEED_WRAP:
             res = doOp(SSLOperation.WRAP, inboundAppData, outboundNetData);
+            handshakeStatus = res.getHandshakeStatus();
             break;
           case NEED_UNWRAP:
             res = doOp(SSLOperation.UNWRAP, inboundNetData, inboundAppData);
@@ -322,12 +400,17 @@ public class MiniSSL extends RubyObject {
               // need more data before we can shake more hands
               done = true;
             }
+            handshakeStatus = res.getHandshakeStatus();
+            break;
+          case NEED_TASK:
+            Runnable runnable;
+            while ((runnable = engine.getDelegatedTask()) != null) {
+              runnable.run();
+            }
+            handshakeStatus = engine.getHandshakeStatus();
             break;
           default:
             done = true;
-        }
-        if (!done) {
-          handshakeStatus = res.getHandshakeStatus();
         }
       }
 
@@ -342,65 +425,54 @@ public class MiniSSL extends RubyObject {
         return getRuntime().getNil();
       }
 
-      RubyString str = getRuntime().newString("");
-      str.setValue(appDataByteList);
-      return str;
-    } catch (Exception e) {
-      throw getRuntime().newEOFError(e.getMessage());
+      return RubyString.newString(getRuntime(), appDataByteList);
+    } catch (SSLException e) {
+      throw newSSLError(getRuntime(), e);
     }
   }
 
   @JRubyMethod
   public IRubyObject write(IRubyObject arg) {
-    try {
-      byte[] bls = arg.convertToString().getBytes();
-      outboundAppData = new MiniSSLBuffer(bls);
+    byte[] bls = arg.convertToString().getBytes();
+    outboundAppData = new MiniSSLBuffer(bls);
 
-      return getRuntime().newFixnum(bls.length);
-    } catch (Exception e) {
-      e.printStackTrace();
-      throw new RuntimeException(e);
-    }
+    return getRuntime().newFixnum(bls.length);
   }
 
   @JRubyMethod
-  public IRubyObject extract() throws SSLException {
+  public IRubyObject extract(ThreadContext context) {
     try {
       ByteList dataByteList = outboundNetData.asByteList();
       if (dataByteList != null) {
-        RubyString str = getRuntime().newString("");
-        str.setValue(dataByteList);
-        return str;
+        return RubyString.newString(context.runtime, dataByteList);
       }
 
       if (!outboundAppData.hasRemaining()) {
-        return getRuntime().getNil();
+        return context.nil;
       }
 
       outboundNetData.clear();
       doOp(SSLOperation.WRAP, outboundAppData, outboundNetData);
       dataByteList = outboundNetData.asByteList();
       if (dataByteList == null) {
-        return getRuntime().getNil();
+        return context.nil;
       }
 
-      RubyString str = getRuntime().newString("");
-      str.setValue(dataByteList);
-
-      return str;
-    } catch (Exception e) {
-      e.printStackTrace();
-      throw new RuntimeException(e);
+      return RubyString.newString(context.runtime, dataByteList);
+    } catch (SSLException e) {
+      throw newSSLError(getRuntime(), e);
     }
   }
 
   @JRubyMethod
-  public IRubyObject peercert() throws CertificateEncodingException {
+  public IRubyObject peercert(ThreadContext context) throws CertificateEncodingException {
+    Certificate peerCert;
     try {
-      return JavaEmbedUtils.javaToRuby(getRuntime(), engine.getSession().getPeerCertificates()[0].getEncoded());
-    } catch (SSLPeerUnverifiedException ex) {
-      return getRuntime().getNil();
+      peerCert = engine.getSession().getPeerCertificates()[0];
+    } catch (SSLPeerUnverifiedException e) {
+      peerCert = lastCheckedCert0; // null if trust check did not happen
     }
+    return peerCert == null ? context.nil : JavaEmbedUtils.javaToRuby(context.runtime, peerCert.getEncoded());
   }
 
   @JRubyMethod(name = "init?")
@@ -419,4 +491,19 @@ public class MiniSSL extends RubyObject {
       return getRuntime().getFalse();
     }
   }
+
+  private static RubyClass getSSLError(Ruby runtime) {
+    return (RubyClass) ((RubyModule) runtime.getModule("Puma").getConstantAt("MiniSSL")).getConstantAt("SSLError");
+  }
+
+  private static RaiseException newSSLError(Ruby runtime, SSLException cause) {
+    return newError(runtime, getSSLError(runtime), cause.toString(), cause);
+  }
+
+  private static RaiseException newError(Ruby runtime, RubyClass errorClass, String message, Throwable cause) {
+    RaiseException ex = RaiseException.from(runtime, errorClass, message);
+    ex.initCause(cause);
+    return ex;
+  }
+
 }

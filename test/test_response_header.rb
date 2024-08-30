@@ -1,9 +1,13 @@
 require_relative "helper"
 require "puma/events"
 require "net/http"
+require "nio"
 
 class TestResponseHeader < Minitest::Test
   parallelize_me!
+
+  # this file has limited response length, so 10kB works.
+  CLIENT_SYSREAD_LENGTH = 10_240
 
   def setup
     @host = "127.0.0.1"
@@ -12,8 +16,8 @@ class TestResponseHeader < Minitest::Test
 
     @app = ->(env) { [200, {}, [env['rack.url_scheme']]] }
 
-    @events = Puma::Events.strings
-    @server = Puma::Server.new @app, @events
+    @log_writer = Puma::LogWriter.strings
+    @server = Puma::Server.new @app, ::Puma::Events.new, {log_writer: @log_writer, min_threads: 1}
   end
 
   def teardown
@@ -24,12 +28,12 @@ class TestResponseHeader < Minitest::Test
   def server_run(app: @app, early_hints: false)
     @server.app = app
     @port = (@server.add_tcp_listener @host, 0).addr[1]
-    @server.early_hints = true if early_hints
+    @server.instance_variable_set(:@early_hints, true) if early_hints
     @server.run
   end
 
   def send_http_and_read(req)
-    send_http(req).read
+    send_http(req).sysread CLIENT_SYSREAD_LENGTH
   end
 
   def send_http(req)
@@ -45,7 +49,7 @@ class TestResponseHeader < Minitest::Test
     server_run app: ->(env) { [200, { 1 => 'Boo'}, []] }
     data = send_http_and_read "GET / HTTP/1.0\r\n\r\n"
 
-    assert_match(/HTTP\/1.1 500 Internal Server Error/, data)
+    assert_match(/Puma caught this error/, data)
   end
 
   # The header must respond to each
@@ -53,7 +57,7 @@ class TestResponseHeader < Minitest::Test
     server_run app: ->(env) { [200, nil, []] }
     data = send_http_and_read "GET / HTTP/1.0\r\n\r\n"
 
-    assert_match(/HTTP\/1.1 500 Internal Server Error/, data)
+    assert_match(/Puma caught this error/, data)
   end
 
   # The values of the header must be Strings
@@ -79,7 +83,11 @@ class TestResponseHeader < Minitest::Test
     server_run(app: app, early_hints: opts[:early_hints])
     data = send_http_and_read "GET / HTTP/1.0\r\n\r\n"
 
-    refute_match("#{name}: #{value}", data)
+    if opts[:early_hints]
+      refute_includes data, "HTTP/1.1 103 Early Hints"
+    end
+
+    refute_includes data, "#{name}: #{value}"
   end
 
   # The header must not contain a Status key.
@@ -92,7 +100,7 @@ class TestResponseHeader < Minitest::Test
     server_run app: ->(env) { [200, {'Teapot-Status' => 'Boiling'}, []] }
     data = send_http_and_read "GET / HTTP/1.0\r\n\r\n"
 
-    assert_match(/HTTP\/1.0 200 OK\r\nTeapot-Status: Boiling\r\n\r\n/, data)
+    assert_match(/HTTP\/1.0 200 OK\r\nTeapot-Status: Boiling\r\nContent-Length: 0\r\n\r\n/, data)
   end
 
   # Special headers starting “rack.” are for communicating with the server, and must not be sent back to the client.
@@ -105,7 +113,7 @@ class TestResponseHeader < Minitest::Test
     server_run app: ->(env) { [200, {'Racket' => 'Bouncy'}, []] }
     data = send_http_and_read "GET / HTTP/1.0\r\n\r\n"
 
-    assert_match(/HTTP\/1.0 200 OK\r\nRacket: Bouncy\r\n\r\n/, data)
+    assert_match(/HTTP\/1.0 200 OK\r\nRacket: Bouncy\r\nContent-Length: 0\r\n\r\n/, data)
   end
 
   # testing header key must conform rfc token specification
@@ -140,5 +148,13 @@ class TestResponseHeader < Minitest::Test
     data = send_http_and_read "GET / HTTP/1.0\r\n\r\n"
 
     refute_match("X-header: First\000 line\r\nX-header: Second Lin\037e\r\n", data)
+  end
+
+  def test_header_value_array
+    server_run app: ->(env) { [200, {'set-cookie' => ['z=1', 'a=2']}, ['Hello']] }
+    data = send_http_and_read "GET / HTTP/1.1\r\n\r\n"
+
+    resp = "HTTP/1.1 200 OK\r\nset-cookie: z=1\r\nset-cookie: a=2\r\nContent-Length: 5\r\n\r\n"
+    assert_includes data, resp
   end
 end

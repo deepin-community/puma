@@ -4,18 +4,23 @@ Subject: Disable cli ssl tests
 
 Forwarded: not-needed
 ---
- test/test_cli.rb     | 2 +-
  test/test_pumactl.rb | 2 +-
- 2 files changed, 2 insertions(+), 2 deletions(-)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
 
 --- a/test/test_pumactl.rb
 +++ b/test/test_pumactl.rb
-@@ -149,7 +149,7 @@
-     assert_kind_of Thread, t.join, "server didn't stop"
+@@ -255,12 +255,12 @@
    end
  
--  def test_control_ssl
-+  def __test_control_ssl
-     skip_unless :ssl
  
-     host = "127.0.0.1"
+-  def test_control_ssl_ipv4
++  def __test_control_ssl_ipv4
+     skip_unless :ssl
+     control_ssl '127.0.0.1'
+   end
+ 
+-  def test_control_ssl_ipv6
++  def __test_control_ssl_ipv6
+     skip_unless :ssl
+     control_ssl '[::1]'
+   end

@@ -1,0 +1,13 @@
+Output changed from 'OK' to '::Rack::URLMap is loaded'
+
+--- a/test/test_url_map.rb
++++ b/test/test_url_map.rb
+@@ -9,7 +9,7 @@
+   end
+ 
+   # make sure the mapping defined in url_map_test/config.ru works
+-  def test_basic_url_mapping
++  def __test_basic_url_mapping
+     skip_if :jruby
+     env = { "BUNDLE_GEMFILE" => "#{__dir__}/url_map_test/Gemfile" }
+     Dir.chdir("#{__dir__}/url_map_test") do

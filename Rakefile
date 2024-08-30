@@ -2,17 +2,21 @@ require "bundler/setup"
 require "rake/testtask"
 require "rake/extensiontask"
 require "rake/javaextensiontask"
-require "rubocop/rake_task"
 require_relative 'lib/puma/detect'
 require 'rubygems/package_task'
 require 'bundler/gem_tasks'
 
+begin
+  # Add rubocop task
+  require "rubocop/rake_task"
+  RuboCop::RakeTask.new
+rescue LoadError
+end
+
 gemspec = Gem::Specification.load("puma.gemspec")
 Gem::PackageTask.new(gemspec).define
 
-# Add rubocop task
-RuboCop::RakeTask.new
-
+Rake::FileUtilsExt.verbose_flag = !!ENV['PUMA_TEST_DEBUG']
 # generate extension code using Ragel (C and Java)
 desc "Generate extension code (C and Java) using Ragel"
 task :ragel
@@ -52,7 +56,7 @@ else
   # override it so we can select the files
   class ::Rake::JavaExtensionTask
     def source_files
-      if ENV["DISABLE_SSL"]
+      if ENV["PUMA_DISABLE_SSL"]
         # uses no_ssl/PumaHttp11Service.java, removes MiniSSL.java
         FileList[
           File.join(@ext_dir, "no_ssl/PumaHttp11Service.java"),
@@ -72,6 +76,7 @@ else
 
   Rake::JavaExtensionTask.new("puma_http11", gemspec) do |ext|
     ext.lib_dir = "lib/puma"
+    ext.release = '8'
   end
 end
 

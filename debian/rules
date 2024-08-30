@@ -4,6 +4,8 @@ export GEM2DEB_TEST_RUNNER = --check-dependencies
 export DH_RUBY = --gem-install
 export DH_RUBY_GEM_INSTALL_EXCLUDE = benchmarks/* docs/* win_gem_test/* tools/* bin/puma-wild
 export LANG = C.UTF-8
+export LC_ALL = C.UTF-8
+export TEST_CASE_TIMEOUT = 300
 
 %:
 	dh $@ --buildsystem=ruby --with ruby

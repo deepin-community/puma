@@ -1,11 +1,13 @@
 # frozen_string_literal: true
 
 begin
-  require 'io/wait'
+  require 'io/wait' unless Puma::HAS_NATIVE_IO_WAIT
 rescue LoadError
 end
 
+require 'open3'
 # need for Puma::MiniSSL::OPENSSL constants used in `HAS_TLS1_3`
+# use require, see https://github.com/puma/puma/pull/2381
 require 'puma/puma_http11'
 
 module Puma
@@ -13,15 +15,16 @@ module Puma
     # Define constant at runtime, as it's easy to determine at built time,
     # but Puma could (it shouldn't) be loaded with an older OpenSSL version
     # @version 5.0.0
-    HAS_TLS1_3 = !IS_JRUBY &&
-      (OPENSSL_VERSION[/ \d+\.\d+\.\d+/].split('.').map(&:to_i) <=> [1,1,1]) != -1 &&
-      (OPENSSL_LIBRARY_VERSION[/ \d+\.\d+\.\d+/].split('.').map(&:to_i) <=> [1,1,1]) !=-1
+    HAS_TLS1_3 = IS_JRUBY ||
+        ((OPENSSL_VERSION[/ \d+\.\d+\.\d+/].split('.').map(&:to_i) <=> [1,1,1]) != -1 &&
+         (OPENSSL_LIBRARY_VERSION[/ \d+\.\d+\.\d+/].split('.').map(&:to_i) <=> [1,1,1]) !=-1)
 
     class Socket
       def initialize(socket, engine)
         @socket = socket
         @engine = engine
         @peercert = nil
+        @reuse = nil
       end
 
       # @!attribute [r] to_io
@@ -50,7 +53,7 @@ module Puma
       # is made with TLSv1.3 as an available protocol
       # @version 5.0.0
       def bad_tlsv1_3?
-        HAS_TLS1_3 && @engine.ssl_vers_st == ['TLSv1.3', 'SSLERR']
+        HAS_TLS1_3 && ssl_version_state == ['TLSv1.3', 'SSLERR']
       end
       private :bad_tlsv1_3?
 
@@ -123,7 +126,7 @@ module Puma
         while true
           wrote = @engine.write data
 
-          enc_wr = ''.dup
+          enc_wr = +''
           while (enc = @engine.extract)
             enc_wr << enc
           end
@@ -181,6 +184,11 @@ module Puma
         @socket.peeraddr
       end
 
+      # OpenSSL is loaded in `MiniSSL::ContextBuilder` when
+      # `MiniSSL::Context#verify_mode` is not `VERIFY_NONE`.
+      # When `VERIFY_NONE`, `MiniSSL::Engine#peercert` is nil, regardless of
+      # whether the client sends a cert.
+      # @return [OpenSSL::X509::Certificate, nil]
       # @!attribute [r] peercert
       def peercert
         return @peercert if @peercert
@@ -195,10 +203,6 @@ module Puma
     if IS_JRUBY
       OPENSSL_NO_SSL3 = false
       OPENSSL_NO_TLS1 = false
-
-      class SSLError < StandardError
-        # Define this for jruby even though it isn't used.
-      end
     end
 
     class Context
@@ -208,49 +212,159 @@ module Puma
       def initialize
         @no_tlsv1   = false
         @no_tlsv1_1 = false
+        @key = nil
+        @cert = nil
+        @key_pem = nil
+        @cert_pem = nil
+        @reuse = nil
+        @reuse_cache_size = nil
+        @reuse_timeout = nil
+      end
+
+      def check_file(file, desc)
+        raise ArgumentError, "#{desc} file '#{file}' does not exist" unless File.exist? file
+        raise ArgumentError, "#{desc} file '#{file}' is not readable" unless File.readable? file
       end
 
       if IS_JRUBY
         # jruby-specific Context properties: java uses a keystore and password pair rather than a cert/key pair
         attr_reader :keystore
+        attr_reader :keystore_type
         attr_accessor :keystore_pass
-        attr_accessor :ssl_cipher_list
+        attr_reader :truststore
+        attr_reader :truststore_type
+        attr_accessor :truststore_pass
+        attr_reader :cipher_suites
+        attr_reader :protocols
 
         def keystore=(keystore)
-          raise ArgumentError, "No such keystore file '#{keystore}'" unless File.exist? keystore
+          check_file keystore, 'Keystore'
           @keystore = keystore
+        end
+
+        def truststore=(truststore)
+          # NOTE: historically truststore was assumed the same as keystore, this is kept for backwards
+          # compatibility, to rely on JVM's trust defaults we allow setting `truststore = :default`
+          unless truststore.eql?(:default)
+            raise ArgumentError, "No such truststore file '#{truststore}'" unless File.exist?(truststore)
+          end
+          @truststore = truststore
+        end
+
+        def keystore_type=(type)
+          raise ArgumentError, "Invalid keystore type: #{type.inspect}" unless ['pkcs12', 'jks', nil].include?(type)
+          @keystore_type = type
+        end
+
+        def truststore_type=(type)
+          raise ArgumentError, "Invalid truststore type: #{type.inspect}" unless ['pkcs12', 'jks', nil].include?(type)
+          @truststore_type = type
+        end
+
+        def cipher_suites=(list)
+          list = list.split(',').map(&:strip) if list.is_a?(String)
+          @cipher_suites = list
+        end
+
+        # aliases for backwards compatibility
+        alias_method :ssl_cipher_list, :cipher_suites
+        alias_method :ssl_cipher_list=, :cipher_suites=
+
+        def protocols=(list)
+          list = list.split(',').map(&:strip) if list.is_a?(String)
+          @protocols = list
         end
 
         def check
           raise "Keystore not configured" unless @keystore
+          # @truststore defaults to @keystore due backwards compatibility
         end
 
       else
         # non-jruby Context properties
         attr_reader :key
+        attr_reader :key_password_command
         attr_reader :cert
         attr_reader :ca
+        attr_reader :cert_pem
+        attr_reader :key_pem
         attr_accessor :ssl_cipher_filter
         attr_accessor :verification_flags
 
+        attr_reader :reuse, :reuse_cache_size, :reuse_timeout
+
         def key=(key)
-          raise ArgumentError, "No such key file '#{key}'" unless File.exist? key
+          check_file key, 'Key'
           @key = key
         end
 
+        def key_password_command=(key_password_command)
+          @key_password_command = key_password_command
+        end
+
         def cert=(cert)
-          raise ArgumentError, "No such cert file '#{cert}'" unless File.exist? cert
+          check_file cert, 'Cert'
           @cert = cert
         end
 
         def ca=(ca)
-          raise ArgumentError, "No such ca file '#{ca}'" unless File.exist? ca
+          check_file ca, 'ca'
           @ca = ca
         end
 
+        def cert_pem=(cert_pem)
+          raise ArgumentError, "'cert_pem' is not a String" unless cert_pem.is_a? String
+          @cert_pem = cert_pem
+        end
+
+        def key_pem=(key_pem)
+          raise ArgumentError, "'key_pem' is not a String" unless key_pem.is_a? String
+          @key_pem = key_pem
+        end
+
         def check
-          raise "Key not configured" unless @key
-          raise "Cert not configured" unless @cert
+          raise "Key not configured" if @key.nil? && @key_pem.nil?
+          raise "Cert not configured" if @cert.nil? && @cert_pem.nil?
+        end
+
+        # Executes the command to return the password needed to decrypt the key.
+        def key_password
+          raise "Key password command not configured" if @key_password_command.nil?
+
+          stdout_str, stderr_str, status = Open3.capture3(@key_password_command)
+
+          return stdout_str.chomp if status.success?
+
+          raise "Key password failed with code #{status.exitstatus}: #{stderr_str}"
+        end
+
+        # Controls session reuse.  Allowed values are as follows:
+        # * 'off' - matches the behavior of Puma 5.6 and earlier.  This is included
+        #   in case reuse 'on' is made the default in future Puma versions.
+        # * 'dflt' - sets session reuse on, with OpenSSL default cache size of
+        #   20k and default timeout of 300 seconds.
+        # * 's,t' - where s and t are integer strings, for size and timeout.
+        # * 's' - where s is an integer strings for size.
+        # * ',t' - where t is an integer strings for timeout.
+        #
+        def reuse=(reuse_str)
+          case reuse_str
+          when 'off'
+            @reuse = nil
+          when 'dflt'
+            @reuse = true
+          when /\A\d+\z/
+            @reuse = true
+            @reuse_cache_size = reuse_str.to_i
+          when /\A\d+,\d+\z/
+            @reuse = true
+            size, time = reuse_str.split ','
+            @reuse_cache_size = size.to_i
+            @reuse_timeout = time.to_i
+          when /\A,\d+\z/
+            @reuse = true
+            @reuse_timeout = reuse_str.delete(',').to_i
+          end
         end
       end
 
